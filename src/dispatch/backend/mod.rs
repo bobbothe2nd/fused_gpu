@@ -1,0 +1,1021 @@
+use alloc::{boxed::Box, vec, vec::Vec};
+
+use crate::{
+    dispatch::{
+        CompilationOptions, GpuBackend,
+        backend::kernel::{Kernel, KernelGroup, SaveIndicator},
+    },
+    errors::{Error, ErrorKind, GraphErrorContext},
+};
+
+pub mod kernel;
+
+#[cfg(feature = "cuda")]
+pub mod cuda;
+
+#[cfg(feature = "rocm")]
+pub mod rocm;
+
+#[cfg(feature = "wgsl")]
+pub mod wgsl;
+
+#[cfg(all(feature = "wgsl", not(any(feature = "rocm", feature = "cuda"))))]
+pub type GpuBuffer = wgsl::GpuBuffer;
+
+#[cfg(all(feature = "rocm", not(feature = "cuda")))]
+pub type GpuBuffer = rocm::GpuBuffer;
+
+#[cfg(feature = "cuda")]
+pub type GpuBuffer = cuda::GpuBuffer;
+
+#[cfg(all(feature = "wgsl", not(any(feature = "rocm", feature = "cuda"))))]
+pub type GpuContext = wgsl::GpuContext;
+
+#[cfg(all(feature = "rocm", not(feature = "cuda")))]
+pub type GpuContext = rocm::GpuContext;
+
+#[cfg(feature = "cuda")]
+pub type GpuContext = cuda::GpuContext;
+
+/// Identifier of a node in a graph.
+pub type NodeId = usize;
+
+/// Identifier of a parameter in kernel IR.
+pub type ParamId = usize;
+
+/// Identifier of a metadata field in kernel IR.
+pub type MetaId = usize;
+
+/// Identifier of a shared buffer in kernel IR.
+pub type SharedId = usize;
+
+/// Identifier of a value in kernel IR.
+pub type ValueId = usize;
+
+/// Data type used in kernel IR.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DType {
+    Float,
+    SignedInt,
+    UnsignedInt,
+    Bool,
+}
+
+/// Parameter type used in kernel IR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Param {
+    pub dtype: DType,
+    pub ty: ParamTy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamTy {
+    Uniform,
+    ReadWrite,
+    ReadOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SharedAlloc {
+    pub dtype: DType,
+    pub size: u32,
+}
+
+/// Value type used in kernel IR.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Value {
+    pub state: ValueState,
+    pub dtype: DType,
+    pub init: Option<Op>,
+}
+
+/// Value state type that defines a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueState {
+    Mut,
+    Immut,
+    Masked,
+    Inline,
+}
+
+/// Axis type used in kernel IR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    /// x-axis (0)
+    X,
+
+    /// y-axis (1)
+    Y,
+
+    /// z-axis (2)
+    Z,
+}
+
+impl TryFrom<u8> for Axis {
+    type Error = Error;
+
+    #[inline]
+    fn try_from(value: u8) -> Result<Self, Error> {
+        match value {
+            0 => Ok(Self::X),
+            1 => Ok(Self::Y),
+            2 => Ok(Self::Z),
+            _ => Err(Error {
+                msg: "could not coerce invalid integer to axis",
+                kind: ErrorKind::InvalidArgument,
+                ctx: (),
+            }),
+        }
+    }
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub enum Op {
+    DefineVar {
+        id: usize,
+    },
+    OverwriteVar {
+        id: usize,
+        val: Box<Self>,
+    },
+    CopyVar {
+        id: usize,
+    },
+
+    ConstF32 {
+        value: f32,
+    },
+    ConstU32 {
+        value: u32,
+    },
+    ConstI32 {
+        value: i32,
+    },
+
+    ReadMeta {
+        param: ParamId,
+        field: MetaId,
+    },
+
+    Lt {
+        a: ValueId,
+        b: ValueId,
+    },
+
+    Gt {
+        a: ValueId,
+        b: ValueId,
+    },
+
+    Le {
+        a: ValueId,
+        b: ValueId,
+    },
+
+    Ge {
+        a: ValueId,
+        b: ValueId,
+    },
+
+    LocalId {
+        axis: Axis,
+    },
+    BlockId {
+        axis: Axis,
+    },
+    GlobalId {
+        axis: Axis,
+    },
+
+    Add {
+        a: ValueId,
+        b: ValueId,
+    },
+    Sub {
+        a: ValueId,
+        b: ValueId,
+    },
+    Mul {
+        a: ValueId,
+        b: ValueId,
+    },
+    Div {
+        a: ValueId,
+        b: ValueId,
+    },
+    Mod {
+        a: ValueId,
+        b: ValueId,
+    },
+    Pow {
+        a: ValueId,
+        b: ValueId,
+    },
+
+    /// (Fused) Operation `a * b + c`
+    Fma {
+        a: ValueId,
+        b: ValueId,
+        c: ValueId,
+    },
+    Max {
+        a: ValueId,
+        b: ValueId,
+    },
+    Min {
+        a: ValueId,
+        b: ValueId,
+    },
+
+    Exp {
+        x: ValueId,
+    },
+    Abs {
+        x: ValueId,
+    },
+    Neg {
+        x: ValueId,
+    },
+    Log {
+        x: ValueId,
+    },
+    Tanh {
+        x: ValueId,
+    },
+    Sqrt {
+        x: ValueId,
+    },
+
+    Load {
+        param: ParamId,
+        index: ValueId,
+    },
+    Store {
+        param: ParamId,
+        index: ValueId,
+        value: ValueId,
+    },
+
+    SharedLoad {
+        mem: SharedId,
+        index: ValueId,
+    },
+    SharedStore {
+        mem: SharedId,
+        index: ValueId,
+        value: ValueId,
+    },
+
+    ForLoopBegin {
+        index: ValueId,
+        end: ValueId,
+        step: ValueId,
+    },
+
+    Continue,
+
+    Break,
+
+    IfBegin {
+        cond: ValueId,
+    },
+
+    EndScope,
+
+    Barrier,
+
+    Return,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Node {
+    pub(crate) op: GraphOp,
+    pub(crate) inputs: Vec<NodeId>,
+    pub(crate) outputs: Vec<NodeId>,
+    pub(crate) shape: Vec<MetaId>,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LossType {
+    MeanSquaredError,
+    CrossEntropy,
+    BinaryCrossEntropy,
+}
+
+#[derive(Debug, Default, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Metadata {
+    fields: MetaId,
+}
+
+impl Metadata {
+    /// Defines an empty metadata instance.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { fields: 0 }
+    }
+
+    /// Defines a new metadata field, returning the identifier.
+    ///
+    /// The identifier will always be 1 more than than the previous field, starting from 0.
+    pub const fn new_field(&mut self) -> MetaId {
+        let field = self.fields;
+        self.fields += 1;
+        field
+    }
+
+    /// Returns an iterator over each index.
+    ///
+    /// This is numerically `0..[len]`.
+    #[must_use]
+    pub const fn iter_fields(&self) -> core::ops::Range<MetaId> {
+        0..self.fields
+    }
+
+    /// Checks if metadata is valid.
+    ///
+    /// Valid metadata is defined as:
+    ///
+    /// - instantiation must be the same length as compile time definition
+    /// - all fields must be multiples of 16 (as of now)
+    ///
+    /// If valid, return `true`. If any of the above criteria fail, return `false`.
+    #[must_use]
+    pub fn validate_meta(&self, meta: &[u32]) -> bool {
+        meta.len() == self.fields && meta.iter().all(|x| x.is_multiple_of(16))
+    }
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GraphOp {
+    Input,
+    ConstF32(f32),
+    ConstF16(u16),
+    ConstI32(i32),
+    ConstU32(u32),
+
+    Add,
+    Sub,
+    Mul,
+    Div,
+
+    Exp,
+    Log,
+    Neg,
+    Abs,
+
+    Tanh,
+    Elu,
+    Relu,
+    Gelu,
+    Sigmoid,
+    Softmax,
+
+    Matmul,
+    Transpose,
+}
+
+impl GraphOp {
+    #[must_use]
+    pub const fn is_elementwise(&self) -> bool {
+        matches!(
+            self,
+            Self::Add
+                | Self::Sub
+                | Self::Mul
+                | Self::Div
+                | Self::Exp
+                | Self::Log
+                | Self::Tanh
+                | Self::Relu
+                | Self::Gelu
+                | Self::Sigmoid
+                | Self::Elu
+        )
+    }
+
+    #[must_use]
+    pub const fn is_transform(&self) -> bool {
+        matches!(self, Self::Transpose | Self::Matmul)
+    }
+
+    #[must_use]
+    pub const fn is_leaf(&self) -> bool {
+        matches!(
+            self,
+            Self::Input
+                | Self::ConstF32(_)
+                | Self::ConstF16(_)
+                | Self::ConstI32(_)
+                | Self::ConstU32(_)
+        )
+    }
+
+    #[must_use]
+    pub const fn is_unary(&self) -> bool {
+        matches!(
+            self,
+            Self::Abs
+                | Self::Elu
+                | Self::Exp
+                | Self::Gelu
+                | Self::Log
+                | Self::Relu
+                | Self::Softmax
+                | Self::Sigmoid
+                | Self::Tanh
+                | Self::Transpose
+        )
+    }
+
+    #[must_use]
+    pub const fn is_binary(&self) -> bool {
+        matches!(
+            self,
+            Self::Add | Self::Mul | Self::Div | Self::Sub | Self::Matmul
+        )
+    }
+
+    #[must_use]
+    pub const fn binary_operator(&self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Mul => "*",
+            Self::Div => "/",
+            Self::Sub => "-",
+            Self::Matmul => "@",
+            _ => "",
+        }
+    }
+}
+
+#[inline]
+fn check_acrylicity(graph: &Graph, errors: &mut Vec<Error<GraphErrorContext>>) {
+    #[inline]
+    fn dfs(
+        node: NodeId,
+        graph: &Graph,
+        visited: &mut [bool],
+        stack: &mut [bool],
+        errors: &mut Vec<Error<GraphErrorContext>>,
+        path: &mut Vec<NodeId>,
+    ) {
+        if stack[node] {
+            errors.push(Error {
+                msg: "graph must be acrylic",
+                kind: ErrorKind::ComputeGraphError,
+                ctx: GraphErrorContext::CycleDetected {
+                    node,
+                    path: path.clone(),
+                },
+            });
+            return;
+        }
+
+        if visited[node] {
+            return;
+        }
+
+        visited[node] = true;
+        stack[node] = true;
+        path.push(node);
+
+        let n = &graph.nodes[node];
+
+        for input in &n.inputs {
+            dfs(*input, graph, visited, stack, errors, path);
+        }
+
+        stack[node] = false;
+        path.clear();
+    }
+
+    let mut visited = vec![false; graph.nodes.len()];
+    let mut stack = vec![false; graph.nodes.len()];
+
+    let mut path = Vec::new();
+    for node_id in 0..graph.nodes.len() {
+        dfs(node_id, graph, &mut visited, &mut stack, errors, &mut path);
+    }
+}
+
+#[inline]
+fn check_inputs_exist(graph: &Graph, errors: &mut Vec<Error<GraphErrorContext>>) {
+    let node_count = graph.nodes.len();
+
+    for (node_id, node) in graph.nodes.iter().enumerate() {
+        for input in &node.inputs {
+            if *input >= node_count {
+                errors.push(Error {
+                    msg: "node referenced non-existent input(s)",
+                    kind: ErrorKind::ComputeGraphError,
+                    ctx: GraphErrorContext::MissingInput {
+                        node: node_id,
+                        input: *input,
+                    },
+                });
+            }
+        }
+    }
+}
+
+#[inline]
+fn check_metadata(graph: &Graph, meta: Metadata, errors: &mut Vec<Error<GraphErrorContext>>) {
+    for (node_id, node) in graph.nodes.iter().enumerate() {
+        for &dim in &node.shape {
+            if dim >= meta.fields {
+                errors.push(Error {
+                    msg: "node has no metadata entry",
+                    kind: ErrorKind::ComputeGraphError,
+                    ctx: GraphErrorContext::MissingMetadata {
+                        node: node_id,
+                        meta: dim,
+                    },
+                });
+            }
+        }
+    }
+}
+
+fn check_shapes(graph: &Graph, errors: &mut Vec<Error<GraphErrorContext>>) {
+    for (node_id, node) in graph.nodes.iter().enumerate() {
+        match node.op {
+            GraphOp::Add | GraphOp::Sub | GraphOp::Mul | GraphOp::Div => {
+                if node.inputs.len() != 2 {
+                    errors.push(Error {
+                        msg: "elementwise binary operation has invalid input count",
+                        kind: ErrorKind::ComputeGraphError,
+                        ctx: GraphErrorContext::InvalidInputs {
+                            node: node_id,
+                            arity: 2,
+                            args: node.inputs.len(),
+                        },
+                    });
+
+                    continue;
+                }
+
+                let Some(a) = graph.nodes.get(node.inputs[0]) else {
+                    continue;
+                };
+                let Some(b) = graph.nodes.get(node.inputs[1]) else {
+                    continue;
+                };
+
+                if a.shape != b.shape {
+                    errors.push(Error {
+                        msg: "elementwise binary operation has invalid input shape(s)",
+                        kind: ErrorKind::ComputeGraphError,
+                        ctx: GraphErrorContext::ShapeMismatch {
+                            node: node_id,
+                            lhs: a.shape.clone(),
+                            rhs: b.shape.clone(),
+                            op: node.op,
+                        },
+                    });
+                }
+            }
+
+            GraphOp::Matmul => {
+                if node.inputs.len() != 2 {
+                    errors.push(Error {
+                        msg: "matrix multiplication has invalid input count",
+                        kind: ErrorKind::ComputeGraphError,
+                        ctx: GraphErrorContext::InvalidInputs {
+                            node: node_id,
+                            arity: 2,
+                            args: node.inputs.len(),
+                        },
+                    });
+
+                    continue;
+                }
+
+                let Some(a) = graph.nodes.get(node.inputs[0]) else {
+                    continue;
+                };
+                let Some(b) = graph.nodes.get(node.inputs[1]) else {
+                    continue;
+                };
+
+                let rank_a = a.shape.len();
+                let rank_b = b.shape.len();
+
+                if rank_a != rank_b {
+                    errors.push(Error {
+                        msg: "matrix multiplication has invalid input rank(s)",
+                        kind: ErrorKind::ComputeGraphError,
+                        ctx: GraphErrorContext::RankMismatch {
+                            node: node_id,
+                            lhs: rank_a,
+                            rhs: rank_b,
+                        },
+                    });
+                }
+
+                let rank = rank_a.min(rank_b);
+
+                if rank < 2 {
+                    errors.push(Error {
+                        msg: "matrix multiplication requires at least a rank of 2",
+                        kind: ErrorKind::ComputeGraphError,
+                        ctx: GraphErrorContext::LowRank {
+                            node: node_id,
+                            rank,
+                            required: 2,
+                        },
+                    });
+                    continue;
+                }
+
+                let k1 = a.shape[a.shape.len() - 1];
+                let k2 = b.shape[b.shape.len() - 2];
+
+                if k1 != k2 {
+                    errors.push(Error {
+                        msg: "inner dimensions don't match for matrix multiplication",
+                        kind: ErrorKind::ComputeGraphError,
+                        ctx: GraphErrorContext::ShapeMismatch {
+                            node: node_id,
+                            lhs: a.shape.clone(),
+                            rhs: b.shape.clone(),
+                            op: node.op,
+                        },
+                    });
+                }
+            }
+
+            GraphOp::Transpose => {
+                if node.inputs.len() != 1 {
+                    errors.push(Error {
+                        msg: "transposition has invalid input count",
+                        kind: ErrorKind::ComputeGraphError,
+                        ctx: GraphErrorContext::InvalidInputs {
+                            node: node_id,
+                            arity: 2,
+                            args: node.inputs.len(),
+                        },
+                    });
+
+                    continue;
+                }
+
+                let Some(x) = graph.nodes.get(node.inputs[0]) else {
+                    continue;
+                };
+
+                let rank = x.shape.len();
+
+                if rank < 2 {
+                    errors.push(Error {
+                        msg: "transposition requires at least a rank of 2",
+                        kind: ErrorKind::ComputeGraphError,
+                        ctx: GraphErrorContext::LowRank {
+                            node: node_id,
+                            rank,
+                            required: 2,
+                        },
+                    });
+                }
+            }
+
+            GraphOp::Abs
+            | GraphOp::Elu
+            | GraphOp::Gelu
+            | GraphOp::Exp
+            | GraphOp::Log
+            | GraphOp::Neg
+            | GraphOp::Relu
+            | GraphOp::Sigmoid
+            | GraphOp::Softmax
+            | GraphOp::Tanh => {
+                if node.inputs.len() != 1 {
+                    errors.push(Error {
+                        msg: "unary operation has invalid input count",
+                        kind: ErrorKind::ComputeGraphError,
+                        ctx: GraphErrorContext::InvalidInputs {
+                            node: node_id,
+                            arity: 1,
+                            args: node.inputs.len(),
+                        },
+                    });
+                }
+            }
+
+            GraphOp::Input
+            | GraphOp::ConstF16(_)
+            | GraphOp::ConstF32(_)
+            | GraphOp::ConstI32(_)
+            | GraphOp::ConstU32(_) => {
+                if !node.inputs.is_empty() {
+                    errors.push(Error {
+                        msg: "leaf node has invalid input count",
+                        kind: ErrorKind::ComputeGraphError,
+                        ctx: GraphErrorContext::InvalidInputs {
+                            node: node_id,
+                            arity: 0,
+                            args: node.inputs.len(),
+                        },
+                    });
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Graph {
+    pub(crate) nodes: Vec<Node>,
+    pub(crate) loss: LossType,
+}
+
+impl Graph {
+    #[must_use]
+    pub const fn new(loss: LossType) -> Self {
+        Self {
+            nodes: Vec::new(),
+            loss,
+        }
+    }
+
+    #[must_use]
+    pub fn get_adjacent(&self, node: NodeId, user: NodeId) -> &[NodeId] {
+        let user_inputs = &self.nodes[user].inputs;
+
+        let mut adjacent: &[NodeId] = &[];
+
+        for input in user_inputs {
+            if *input != node {
+                continue;
+            }
+
+            adjacent = &self.nodes[*input].outputs;
+        }
+
+        adjacent
+    }
+
+    #[must_use]
+    pub fn is_lhs_edge(&self, node: NodeId, user: NodeId) -> bool {
+        let user_inputs = &self.nodes[user].inputs;
+
+        !user_inputs.is_empty() && user_inputs[0] == node
+    }
+
+    #[must_use]
+    pub fn is_rhs_edge(&self, node: NodeId, user: NodeId) -> bool {
+        let user_inputs = &self.nodes[user].inputs;
+
+        user_inputs.len() > 1 && user_inputs[1] == node
+    }
+
+    #[must_use]
+    pub fn is_edge(&self, node: NodeId, user: NodeId, edge: usize) -> bool {
+        let user_inputs = &self.nodes[user].inputs;
+
+        user_inputs.len() > edge && user_inputs[edge] == node
+    }
+
+    pub fn topo_sort(&mut self) -> Result<(), Error<GraphErrorContext>> {
+        let n = self.nodes.len();
+
+        let mut in_degree = vec![0usize; n];
+        let mut adj = vec![Vec::<usize>::new(); n];
+
+        for (node_id, node) in self.nodes.iter().enumerate() {
+            for &inp in &node.inputs {
+                if inp >= n {
+                    return Err(Error {
+                        msg: "invalid node reference in graph",
+                        kind: ErrorKind::ComputeGraphError,
+                        ctx: GraphErrorContext::MissingInput {
+                            node: node_id,
+                            input: inp,
+                        },
+                    });
+                }
+
+                adj[inp].push(node_id);
+                in_degree[node_id] += 1;
+            }
+        }
+
+        let mut zeros: Vec<_> = (0..n).filter(|&i| in_degree[i] == 0).collect();
+
+        zeros.sort_unstable();
+
+        let mut order = Vec::with_capacity(n);
+
+        let mut idx = 0;
+        while idx < zeros.len() {
+            let node = zeros[idx];
+            idx += 1;
+
+            order.push(node);
+
+            let mut nexts = adj[node].clone();
+            nexts.sort_unstable();
+
+            for nxt in nexts {
+                in_degree[nxt] -= 1;
+                if in_degree[nxt] == 0 {
+                    zeros.push(nxt);
+                }
+            }
+        }
+
+        if order.len() != n {
+            return Err(Error {
+                msg: "cycle detected in graph",
+                kind: ErrorKind::ComputeGraphError,
+                ctx: GraphErrorContext::CycleDetected {
+                    node: 0,
+                    path: order,
+                },
+            });
+        }
+
+        let mut new_index = vec![0usize; n];
+        for (i, &old) in order.iter().enumerate() {
+            new_index[old] = i;
+        }
+
+        let mut new_nodes = Vec::with_capacity(n);
+
+        for &old_id in &order {
+            let mut node = self.nodes[old_id].clone();
+
+            for inp in &mut node.inputs {
+                *inp = new_index[*inp];
+            }
+
+            node.outputs.clear();
+
+            new_nodes.push(node);
+        }
+
+        self.nodes = new_nodes;
+
+        Ok(())
+    }
+
+    pub fn rebuild_outputs(&mut self) {
+        let mut outs = vec![Vec::new(); self.nodes.len()];
+
+        for (node_id, node) in self.nodes.iter().enumerate() {
+            for &inp in &node.inputs {
+                outs[inp].push(node_id);
+            }
+        }
+
+        for (i, o) in outs.into_iter().enumerate() {
+            self.nodes[i].outputs = o;
+        }
+    }
+
+    /// Validates the graph for mathematical correctness given the metadata usesd during lowering.
+    ///
+    /// This function will not panic, but it can stop many panics and bugs in:
+    ///
+    /// - [`Self::lower`]
+    /// - [`GpuContext::compile`](`super::GpuContext::compile`)
+    /// - [`GpuContext::launch_forward`](`super::GpuContext::launch_forward`)
+    /// - [`GpuContext::launch_backward`](`super::GpuContext::launch_backward`)
+    /// - [`GpuContext::launch_loss`](`super::GpuContext::launch_loss`)
+    ///
+    /// It is recommended that you run this function on your graph at least in debug mode, or
+    /// you could have panics in production code.
+    pub fn validate(&self, meta: Metadata) -> Result<(), Vec<Error<GraphErrorContext>>> {
+        let mut errors = Vec::new();
+
+        check_acrylicity(self, &mut errors);
+        check_inputs_exist(self, &mut errors);
+        check_metadata(self, meta, &mut errors);
+        check_shapes(self, &mut errors);
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    pub fn lower<B: GpuBackend>(
+        &self,
+        meta: Metadata,
+        options: &CompilationOptions<B>,
+        saved: &[SaveIndicator],
+    ) -> Result<KernelGroup, Error> {
+        Kernel::lower(self, meta, saved, options)
+    }
+
+    fn add_node(&mut self, op: GraphOp, inputs: Vec<NodeId>, shape: Vec<MetaId>) -> NodeId {
+        let id = self.nodes.len();
+
+        for node_id in &inputs {
+            let node = &mut self.nodes[*node_id];
+            node.outputs.push(id);
+        }
+
+        self.nodes.push(Node {
+            outputs: Vec::new(),
+            op,
+            inputs,
+            shape,
+        });
+
+        id
+    }
+
+    pub fn input(&mut self, shape: &[MetaId]) -> NodeId {
+        self.add_node(GraphOp::Input, Vec::new(), shape.to_vec())
+    }
+
+    pub fn constant_f32(&mut self, data: f32) -> NodeId {
+        self.add_node(GraphOp::ConstF32(data), Vec::new(), Vec::new())
+    }
+
+    pub fn constant_f16(&mut self, data: u16) -> NodeId {
+        self.add_node(GraphOp::ConstF16(data), Vec::new(), Vec::new())
+    }
+
+    pub fn constant_i32(&mut self, data: i32) -> NodeId {
+        self.add_node(GraphOp::ConstI32(data), Vec::new(), Vec::new())
+    }
+
+    pub fn constant_u32(&mut self, data: u32) -> NodeId {
+        self.add_node(GraphOp::ConstU32(data), Vec::new(), Vec::new())
+    }
+
+    pub fn add(&mut self, a: NodeId, b: NodeId) -> NodeId {
+        self.add_node(GraphOp::Add, vec![a, b], self.nodes[a].shape.clone())
+    }
+
+    pub fn mul(&mut self, a: NodeId, b: NodeId) -> NodeId {
+        self.add_node(GraphOp::Mul, vec![a, b], self.nodes[a].shape.clone())
+    }
+
+    pub fn sub(&mut self, a: NodeId, b: NodeId) -> NodeId {
+        self.add_node(GraphOp::Sub, vec![a, b], self.nodes[a].shape.clone())
+    }
+
+    pub fn div(&mut self, a: NodeId, b: NodeId) -> NodeId {
+        self.add_node(GraphOp::Div, vec![a, b], self.nodes[a].shape.clone())
+    }
+
+    pub fn softmax(&mut self, x: NodeId) -> NodeId {
+        self.add_node(GraphOp::Softmax, vec![x], self.nodes[x].shape.clone())
+    }
+
+    pub fn log(&mut self, x: NodeId) -> NodeId {
+        self.add_node(GraphOp::Log, vec![x], self.nodes[x].shape.clone())
+    }
+
+    pub fn tanh(&mut self, x: NodeId) -> NodeId {
+        self.add_node(GraphOp::Tanh, vec![x], self.nodes[x].shape.clone())
+    }
+
+    pub fn elu(&mut self, x: NodeId) -> NodeId {
+        self.add_node(GraphOp::Elu, vec![x], self.nodes[x].shape.clone())
+    }
+
+    pub fn relu(&mut self, x: NodeId) -> NodeId {
+        self.add_node(GraphOp::Relu, vec![x], self.nodes[x].shape.clone())
+    }
+
+    pub fn gelu(&mut self, x: NodeId) -> NodeId {
+        self.add_node(GraphOp::Gelu, vec![x], self.nodes[x].shape.clone())
+    }
+
+    pub fn exp(&mut self, x: NodeId) -> NodeId {
+        self.add_node(GraphOp::Exp, vec![x], self.nodes[x].shape.clone())
+    }
+
+    pub fn abs(&mut self, x: NodeId) -> NodeId {
+        self.add_node(GraphOp::Abs, vec![x], self.nodes[x].shape.clone())
+    }
+
+    pub fn neg(&mut self, x: NodeId) -> NodeId {
+        self.add_node(GraphOp::Neg, vec![x], self.nodes[x].shape.clone())
+    }
+
+    pub fn matmul(&mut self, a: NodeId, b: NodeId) -> NodeId {
+        let mut shape = self.nodes[a].shape.clone();
+        let last_idx = shape.len() - 1;
+        shape[last_idx] = self.nodes[b].shape[last_idx];
+
+        self.add_node(GraphOp::Matmul, vec![a, b], shape)
+    }
+
+    pub fn transpose(&mut self, x: NodeId) -> NodeId {
+        let mut shape = self.nodes[x].shape.clone();
+        let last_idx = shape.len() - 1;
+        let last2_idx = shape.len() - 2;
+        shape.swap(last_idx, last2_idx);
+
+        self.add_node(GraphOp::Transpose, vec![x], shape)
+    }
+}
