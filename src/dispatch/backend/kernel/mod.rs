@@ -16,10 +16,6 @@ mod backward;
 
 mod loss;
 
-mod matmul;
-
-const TILE_SIZE: u32 = 16;
-
 /// Forward, backward, and loss kernel IR.
 #[derive(Debug, Clone)]
 pub struct KernelGroup {
@@ -136,10 +132,10 @@ impl core::ops::BitOrAssign for SaveIndicator {
 }
 
 impl SaveIndicator {
-    const DEFINED_IN_FORWARD: Self = Self { flags: 0b0000_0001 };
-    const USED_BY_FORWARD: Self = Self { flags: 0b0000_0010 };
-    const DEFINED_IN_BACKWARD: Self = Self { flags: 0b0000_0100 };
-    const USED_BY_BACKWARD: Self = Self { flags: 0b0000_1000 };
+    pub const DEFINED_IN_FORWARD: Self = Self { flags: 0b0000_0001 };
+    pub const USED_BY_FORWARD: Self = Self { flags: 0b0000_0010 };
+    pub const DEFINED_IN_BACKWARD: Self = Self { flags: 0b0000_0100 };
+    pub const USED_BY_BACKWARD: Self = Self { flags: 0b0000_1000 };
 
     #[must_use]
     pub const fn or(self, other: Self) -> Self {
@@ -202,48 +198,8 @@ impl Kernel {
                         SaveIndicator::DEFINED_IN_BACKWARD | SaveIndicator::USED_BY_BACKWARD;
                 }
 
-                GraphOp::Matmul => {
-                    saved[node_id] |= SaveIndicator::DEFINED_IN_FORWARD
-                        | SaveIndicator::USED_BY_FORWARD
-                        | SaveIndicator::DEFINED_IN_BACKWARD
-                        | SaveIndicator::USED_BY_BACKWARD;
-
-                    for &inp in &node.inputs {
-                        if !graph.nodes[inp].inputs.is_empty() {
-                            saved[inp] |=
-                                SaveIndicator::DEFINED_IN_FORWARD | SaveIndicator::USED_BY_FORWARD;
-                        }
-                    }
-                }
-
-                GraphOp::Mul | GraphOp::Div => {
-                    for &inp in &node.inputs {
-                        if !graph.nodes[inp].inputs.is_empty() {
-                            saved[inp] |=
-                                SaveIndicator::DEFINED_IN_FORWARD | SaveIndicator::USED_BY_BACKWARD;
-                        }
-                    }
-                }
-
-                GraphOp::Softmax => {
-                    saved[node_id] |=
-                        SaveIndicator::DEFINED_IN_FORWARD | SaveIndicator::USED_BY_BACKWARD;
-                }
-
-                GraphOp::Tanh
-                | GraphOp::Sigmoid
-                | GraphOp::Exp
-                | GraphOp::Relu
-                | GraphOp::Gelu
-                | GraphOp::Log
-                | GraphOp::Abs
-                | GraphOp::Neg => {
-                    let inp = node.inputs[0];
-
-                    if !graph.nodes[inp].inputs.is_empty() {
-                        saved[inp] |=
-                            SaveIndicator::DEFINED_IN_FORWARD | SaveIndicator::USED_BY_BACKWARD;
-                    }
+                GraphOp::Custom { save, .. } => {
+                    save(node_id, node, graph, &mut saved);
                 }
 
                 _ => {}
@@ -254,8 +210,8 @@ impl Kernel {
     }
 
     /// Lowers an execution graph into kernels.
-    pub fn lower<B: GpuBackend>(
-        graph: &Graph,
+    pub fn lower<B: GpuBackend + Clone>(
+        graph: &Graph<B>,
         meta: Metadata,
         saved: &[SaveIndicator],
         options: &CompilationOptions<B>,
@@ -293,6 +249,13 @@ impl Kernel {
         });
     }
 
+    pub fn accum_var(&mut self, id: ValueId, op: Op) {
+        self.ops.push(Op::AccumVar {
+            id,
+            val: Box::new(op),
+        });
+    }
+
     pub fn update_state(&mut self, id: ValueId, state: ValueState) {
         self.values[id].state = state;
     }
@@ -311,9 +274,23 @@ impl Kernel {
         self.ops.push(Op::Return);
     }
 
-    pub fn push_if<F: FnOnce(&mut Self)>(&mut self, cond: ValueId, content: F) {
+    pub fn push_if(&mut self, cond: ValueId, content: impl FnOnce(&mut Self)) {
         self.ops.push(Op::IfBegin { cond });
         content(self);
+        self.ops.push(Op::EndScope);
+    }
+
+    pub fn push_if_else(
+        &mut self,
+        cond: ValueId,
+        content: impl FnOnce(&mut Self),
+        else_content: impl FnOnce(&mut Self),
+    ) {
+        self.ops.push(Op::IfBegin { cond });
+        content(self);
+        self.ops.push(Op::EndScope);
+        self.ops.push(Op::ElseBegin);
+        else_content(self);
         self.ops.push(Op::EndScope);
     }
 

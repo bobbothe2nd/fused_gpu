@@ -26,6 +26,7 @@ std = []
 cuda = ["std"]
 rocm = ["std"]
 wgsl = ["std", "dep:wgpu"]
+standard_ops = []
 
 [[example]]
 name = "matmul_chain3"

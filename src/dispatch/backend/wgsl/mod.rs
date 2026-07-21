@@ -115,11 +115,16 @@ impl GpuContext {
 pub struct GpuKernel {
     kernel: ComputePipeline,
     iter_space: Vec<MetaId>,
+    block: [u32; 3],
 }
 
 impl GpuKernelBackend for GpuKernel {
     fn iteration_space(&self) -> &[MetaId] {
         &self.iter_space
+    }
+
+    fn block(&self) -> &[u32; 3] {
+        &self.block
     }
 }
 
@@ -273,6 +278,8 @@ impl GpuBackend for GpuContext {
     ) -> Result<Self::Kernel, Error> {
         let source = generate_wgsl(src, options.debug.pretty_print_ir);
 
+        std::eprintln!("root {} = {source:?}", src.root);
+
         let shader = self.device.create_shader_module(ShaderModuleDescriptor {
             label: Some("shader"),
             source: ShaderSource::Wgsl(source.into()),
@@ -290,6 +297,7 @@ impl GpuBackend for GpuContext {
                     cache: None,
                 }),
             iter_space: src.iter_space.clone(),
+            block: src.block,
         })
     }
 
@@ -339,7 +347,7 @@ impl GpuBackend for GpuContext {
             pass.dispatch_workgroups(dispatch_x, dispatch_y, dispatch_z);
         }
 
-        self.queue.submit(Some(encoder.finish()))
+        self.queue.submit([encoder.finish()])
     }
 
     #[inline]
@@ -546,6 +554,16 @@ fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &Kernel) {
             let val = &kernel.values[*id];
             match val.state {
                 ValueState::Masked | ValueState::Inline => {}
+                ValueState::Const => {
+                    let _ = write!(out, "const v{id}: {}", get_dtype(val.dtype));
+
+                    if let Some(op) = &val.init {
+                        let _ = out.write_str(" = ");
+                        process_op(out, op, nesting, kernel);
+                    }
+
+                    let _ = out.write_char(';');
+                }
                 var => {
                     if var == ValueState::Immut {
                         let _ = write!(out, "let v{id}: {}", get_dtype(val.dtype));
@@ -565,6 +583,12 @@ fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &Kernel) {
 
         Op::OverwriteVar { id, val } => {
             let _ = write!(out, "v{id} = ");
+            process_op(out, val, nesting, kernel);
+            let _ = write!(out, ";");
+        }
+
+        Op::AccumVar { id, val } => {
+            let _ = write!(out, "v{id} += ");
             process_op(out, val, nesting, kernel);
             let _ = write!(out, ";");
         }
@@ -719,6 +743,16 @@ fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &Kernel) {
             );
         }
 
+        Op::Select { cond, a, b } => {
+            let _ = write!(
+                out,
+                "select({}, {}, {})",
+                render_val(*cond, kernel),
+                render_val(*a, kernel),
+                render_val(*b, kernel),
+            );
+        }
+
         Op::Exp { x } => {
             let _ = write!(out, "exp({})", render_val(*x, kernel));
         }
@@ -785,6 +819,11 @@ fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &Kernel) {
 
         Op::IfBegin { cond } => {
             let _ = write!(out, "if ({}) {{", render_val(*cond, kernel));
+            *nesting += 1;
+        }
+
+        Op::ElseBegin => {
+            let _ = write!(out, "else {{");
             *nesting += 1;
         }
 

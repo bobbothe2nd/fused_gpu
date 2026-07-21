@@ -21,6 +21,7 @@
 #![allow(clippy::cast_possible_truncation)]
 #![forbid(clippy::nursery)]
 #![deny(clippy::all)]
+#![allow(clippy::type_complexity)]
 #![allow(clippy::too_many_arguments)]
 #![forbid(clippy::unwrap_used)]
 #![forbid(clippy::expect_used)]

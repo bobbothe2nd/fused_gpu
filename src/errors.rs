@@ -2,9 +2,10 @@
 
 use alloc::vec::Vec;
 use core::error::Error as CoreError;
-use core::fmt::{Debug, Display};
+use core::fmt::{Debug, Display, Formatter, Result};
 
-use crate::dispatch::backend::{GraphOp, MetaId, NodeId};
+use crate::dispatch::GpuBackend;
+use crate::dispatch::backend::{GpuContext, GraphOp, MetaId, NodeId};
 
 /// Generic error type with message, type, and display.
 #[derive(Clone)]
@@ -17,7 +18,7 @@ pub struct Error<C = ()> {
 impl core::error::Error for Error {}
 
 impl<C: Debug> Debug for Error<C> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         if size_of::<C>() == 0 {
             write!(f, "Error {{ kind: {:?}, msg: {:?} }}", self.kind, self.msg)
         } else {
@@ -31,13 +32,13 @@ impl<C: Debug> Debug for Error<C> {
 }
 
 impl Display for Error {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         write!(f, "{}: {}", self.kind, self.msg)
     }
 }
 
-impl Display for Error<GraphErrorContext> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl<B: GpuBackend + Clone> Display for Error<GraphErrorContext<B>> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         debug_assert_eq!(self.kind, ErrorKind::ComputeGraphError);
 
         write!(f, "{}: {}", self.msg, self.ctx)
@@ -70,6 +71,8 @@ pub enum ErrorKind {
 
     InvalidDType,
 
+    UnresolvedInput,
+
     UnresolvedOutput,
 
     InvalidArgument,
@@ -80,7 +83,7 @@ pub enum ErrorKind {
 }
 
 impl Display for ErrorKind {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         match self {
             Self::EnvNotSet => write!(f, "environment not set"),
             Self::LimitsExceeded => write!(f, "GPU limits exceeded"),
@@ -90,6 +93,7 @@ impl Display for ErrorKind {
             Self::ParamNotMaterialized => write!(f, "param not materialized"),
             Self::GraphEmpty => write!(f, "graph empty"),
             Self::InvalidDType => write!(f, "invalid data type"),
+            Self::UnresolvedInput => write!(f, "unresolved input"),
             Self::UnresolvedOutput => write!(f, "unresolved output"),
             Self::InvalidArgument => write!(f, "invalid argument"),
             Self::ComputeGraphError => write!(f, "compute graph error"),
@@ -98,8 +102,8 @@ impl Display for ErrorKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum GraphErrorContext {
+#[derive(Debug, Clone)]
+pub enum GraphErrorContext<B: GpuBackend + Clone = GpuContext> {
     CycleDetected {
         node: NodeId,
         path: Vec<NodeId>,
@@ -118,15 +122,13 @@ pub enum GraphErrorContext {
 
     ShapeMismatch {
         node: NodeId,
-        lhs: Vec<MetaId>,
-        rhs: Vec<MetaId>,
-        op: GraphOp,
+        all_hand_sides: Vec<Vec<MetaId>>,
+        op: GraphOp<B>,
     },
 
     RankMismatch {
         node: NodeId,
-        lhs: usize,
-        rhs: usize,
+        all_hand_sides: Vec<usize>,
     },
 
     InvalidAxis {
@@ -147,35 +149,61 @@ pub enum GraphErrorContext {
     },
 }
 
-impl Display for GraphErrorContext {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl<B: GpuBackend + Clone> Display for GraphErrorContext<B> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         match self {
             Self::CycleDetected { node, path } => {
                 write!(f, "cycle detected at node {node} following {path:?}")
             }
+
             Self::InvalidAxis { node, axis, rank } => {
                 write!(f, "invalid axis {axis} for rank of {rank} at node {node}")
             }
+
             Self::InvalidInputs { node, arity, args } => {
                 write!(
                     f,
                     "invalid input count {args} for arity of {arity} at node {node}"
                 )
             }
+
             Self::MissingInput { node, input } => {
                 write!(f, "missing input at node {node} on input node {input}")
             }
+
             Self::MissingMetadata { node, meta } => {
                 write!(f, "missing metadata at node {node} on field f{meta}")
             }
-            Self::ShapeMismatch { node, lhs, rhs, op } => write!(
+
+            Self::ShapeMismatch {
+                node,
+                all_hand_sides,
+                op,
+            } => write!(
                 f,
-                "shape mismatch at node {node} ({lhs:?} {} {rhs:?})",
-                op.binary_operator()
+                "shape mismatch at node {node} {}",
+                op.debug(all_hand_sides)
             ),
-            Self::RankMismatch { node, lhs, rhs } => {
-                write!(f, "rank mismatch at node {node} ({lhs} == {rhs})")
+
+            Self::RankMismatch {
+                node,
+                all_hand_sides,
+            } => {
+                let closure = |f: &mut Formatter, node: &usize, all_hand_sides: &[usize]| {
+                    write!(f, "rank mismatch at node {node}")?;
+
+                    write!(f, "{}", all_hand_sides[0])?;
+
+                    for hand_side in all_hand_sides.iter().skip(1) {
+                        write!(f, "== {hand_side}")?;
+                    }
+
+                    Ok(())
+                };
+
+                closure(f, node, all_hand_sides)
             }
+
             Self::LowRank {
                 node,
                 rank,
@@ -185,4 +213,4 @@ impl Display for GraphErrorContext {
     }
 }
 
-impl CoreError for GraphErrorContext {}
+impl<B: GpuBackend + Clone + Debug> CoreError for GraphErrorContext<B> {}

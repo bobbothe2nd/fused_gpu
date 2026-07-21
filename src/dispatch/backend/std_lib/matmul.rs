@@ -1,23 +1,20 @@
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend,
-        backend::{
-            DType, Graph, NodeId, Op, ParamId, ValueId, ValueState,
-            kernel::{Kernel, NodeInput},
+        CompilationOptions, GpuBackend, backend::{
+            Axis, DType, DispatchOptions, Graph, GraphOp, Node, NodeId, Op, ParamId, ValueId, ValueState, kernel::{Kernel, NodeInput, SaveIndicator},
         },
-    },
-    errors::Error,
+    }, errors::{Error, ErrorKind, GraphErrorContext},
 };
-use alloc::vec::Vec;
+use alloc::{format, vec, vec::Vec};
 
-pub fn lower_matmul_recursive<B: GpuBackend>(
+pub fn lower_matmul_recursive<B: GpuBackend + Clone>(
     eval_node: impl Fn(
         NodeId,
         NodeId,
         &NodeInput,
         ValueId,
         &mut Vec<NodeId>,
-        &Graph,
+        &Graph<B>,
         &[Option<ParamId>],
         &[Option<ParamId>],
         &mut Kernel,
@@ -33,26 +30,67 @@ pub fn lower_matmul_recursive<B: GpuBackend>(
     root: NodeId,
     input: NodeId,
     resolved: &mut Vec<NodeId>,
-    transpose_a: bool,
-    transpose_b: bool,
-    a_node: &NodeInput,
-    b_node: &NodeInput,
-    graph: &Graph,
+    backwardness: Option<u8>,
+    node_id: NodeId,
+    graph: &Graph<B>,
     out: ValueId,
     node_params: &[Option<ParamId>],
     saved_params: &[Option<ParamId>],
     kernel: &mut Kernel,
     base: ValueId,
-    row: ValueId,
-    col: ValueId,
+    _idx: ValueId,
     local_row: ValueId,
     local_col: ValueId,
     shared_size: u32,
     tile_size: ValueId,
+    _stable_iteration_space: bool,
     options: &CompilationOptions<B>,
 ) -> Result<Vec<NodeId>, Error> {
+    let row = kernel.def_var(
+        DType::UnsignedInt,
+        ValueState::Immut,
+        Some(Op::GlobalId { axis: Axis::Y }),
+    );
+    let col = kernel.def_var(
+        DType::UnsignedInt,
+        ValueState::Immut,
+        Some(Op::GlobalId { axis: Axis::X }),
+    );
+
+    let node = &graph.nodes[node_id];
+
+    let (a_node, b_node);
+
+    if backwardness == Some(0) {
+        let param = saved_params[node.inputs[1]].ok_or(Error {
+            msg: "saved input parameter could not be materialized",
+            kind: ErrorKind::ParamNotMaterialized,
+            ctx: (),
+        })?;
+        let shape = &graph.nodes[node.inputs[1]].shape;
+
+        a_node = NodeInput::Node(node_id);
+        b_node = NodeInput::Raw { param, shape };
+    } else if backwardness == Some(1) {
+        let param = saved_params[node.inputs[0]].ok_or(Error {
+            msg: "saved input parameter could not be materialized",
+            kind: ErrorKind::ParamNotMaterialized,
+            ctx: (),
+        })?;
+        let shape = &graph.nodes[node.inputs[0]].shape;
+
+        a_node = NodeInput::Raw { param, shape };
+        b_node = NodeInput::Node(node_id);
+    } else {
+        a_node = NodeInput::Node(node.inputs[0]);
+        b_node = NodeInput::Node(node.inputs[1]);
+    }
+
+    let transpose_a = backwardness == Some(1);
+    let transpose_b = backwardness == Some(0);
+
     let mut a_node_shape = match a_node {
-        NodeInput::Node(node) => graph.nodes[*node].shape.clone(),
+        NodeInput::Node(node) => graph.nodes[node].shape.clone(),
         NodeInput::Raw { param: _, shape } => shape.to_vec(),
     };
 
@@ -62,7 +100,7 @@ pub fn lower_matmul_recursive<B: GpuBackend>(
     }
 
     let mut b_node_shape = match b_node {
-        NodeInput::Node(node) => graph.nodes[*node].shape.clone(),
+        NodeInput::Node(node) => graph.nodes[node].shape.clone(),
         NodeInput::Raw { param: _, shape } => shape.to_vec(),
     };
 
@@ -106,8 +144,8 @@ pub fn lower_matmul_recursive<B: GpuBackend>(
         k,
         transpose_a,
         transpose_b,
-        a_node,
-        b_node,
+        &a_node,
+        &b_node,
         graph,
         out,
         node_params,
@@ -124,14 +162,14 @@ pub fn lower_matmul_recursive<B: GpuBackend>(
     )
 }
 
-pub fn forward_matmul<B: GpuBackend>(
+pub fn forward_matmul<B: GpuBackend + Clone>(
     eval_node: impl Fn(
         NodeId,
         NodeId,
         &NodeInput,
         ValueId,
         &mut Vec<NodeId>,
-        &Graph,
+        &Graph<B>,
         &[Option<ParamId>],
         &[Option<ParamId>],
         &mut Kernel,
@@ -154,7 +192,7 @@ pub fn forward_matmul<B: GpuBackend>(
     swap_b: bool,
     a_node: &NodeInput,
     b_node: &NodeInput,
-    graph: &Graph,
+    graph: &Graph<B>,
     out: ValueId,
     node_params: &[Option<ParamId>],
     saved_params: &[Option<ParamId>],
@@ -175,11 +213,9 @@ pub fn forward_matmul<B: GpuBackend>(
 
     let one = kernel.def_var(
         DType::UnsignedInt,
-        ValueState::Immut,
+        ValueState::Inline,
         Some(Op::ConstU32 { value: 1 }),
     );
-
-    kernel.overwrite_var(out, Op::ConstF32 { value: 0.0 });
 
     let tk = kernel.def_var(
         DType::UnsignedInt,
@@ -260,7 +296,11 @@ pub fn forward_matmul<B: GpuBackend>(
             )
         };
 
-        let a_val = kernel.def_var(DType::Float, ValueState::Mut, None);
+        let a_val = kernel.def_var(
+            DType::Float,
+            ValueState::Mut,
+            Some(Op::ConstF32 { value: 0.0 }),
+        );
 
         a_deepest = eval_node(
             root,
@@ -318,7 +358,11 @@ pub fn forward_matmul<B: GpuBackend>(
             )
         };
 
-        let b_val = kernel.def_var(DType::Float, ValueState::Mut, None);
+        let b_val = kernel.def_var(
+            DType::Float,
+            ValueState::Mut,
+            Some(Op::ConstF32 { value: 0.0 }),
+        );
 
         b_deepest = eval_node(
             root,
@@ -424,4 +468,105 @@ pub fn forward_matmul<B: GpuBackend>(
     deepest.append(&mut b_deepest);
 
     Ok(deepest)
+}
+
+impl<B: GpuBackend + Clone> Graph<B> {
+    pub fn matmul(&mut self, a: NodeId, b: NodeId) -> NodeId {
+        fn save<B: GpuBackend + Clone>(
+            node_id: NodeId,
+            node: &Node<B>,
+            graph: &Graph<B>,
+            saved: &mut [SaveIndicator],
+        ) {
+            saved[node_id] |= SaveIndicator::DEFINED_IN_FORWARD
+                | SaveIndicator::USED_BY_FORWARD
+                | SaveIndicator::DEFINED_IN_BACKWARD
+                | SaveIndicator::USED_BY_BACKWARD;
+
+            for &inp in &node.inputs {
+                if !graph.nodes[inp].inputs.is_empty() {
+                    saved[inp] |=
+                        SaveIndicator::DEFINED_IN_FORWARD | SaveIndicator::USED_BY_FORWARD;
+                }
+            }
+        }
+
+        fn valid_shape<B: GpuBackend + Clone>(
+            node_id: NodeId,
+            node: &Node<B>,
+            graph: &Graph<B>,
+            errors: &mut Vec<Error<GraphErrorContext<B>>>,
+        ) {
+            if node.inputs.len() != 2 {
+                errors.push(Error {
+                    msg: "matrix multiplication has invalid input count",
+                    kind: ErrorKind::ComputeGraphError,
+                    ctx: GraphErrorContext::InvalidInputs {
+                        node: node_id,
+                        arity: 2,
+                        args: node.inputs.len(),
+                    },
+                });
+
+                return;
+            }
+
+            let Some(a) = graph.nodes.get(node.inputs[0]) else {
+                return;
+            };
+            let Some(b) = graph.nodes.get(node.inputs[1]) else {
+                return;
+            };
+
+            let rank_a = a.shape.len();
+            let rank_b = b.shape.len();
+
+            if rank_a != rank_b {
+                errors.push(Error {
+                    msg: "matrix multiplication has invalid input rank(s)",
+                    kind: ErrorKind::ComputeGraphError,
+                    ctx: GraphErrorContext::RankMismatch {
+                        node: node_id,
+                        all_hand_sides: vec![rank_a, rank_b],
+                    },
+                });
+            }
+
+            let k1 = a.shape[a.shape.len() - 1];
+            let k2 = b.shape[b.shape.len() - 2];
+
+            if k1 != k2 {
+                errors.push(Error {
+                    msg: "inner dimensions don't match for matrix multiplication",
+                    kind: ErrorKind::ComputeGraphError,
+                    ctx: GraphErrorContext::ShapeMismatch {
+                        node: node_id,
+                        all_hand_sides: vec![a.shape.clone(), b.shape.clone()],
+                        op: node.op.clone(),
+                    },
+                });
+            }
+        }
+
+        let mut shape = self.nodes[a].shape.clone();
+        let last_idx = shape.len() - 1;
+        shape[last_idx] = self.nodes[b].shape[last_idx];
+
+        self.add_node(
+            GraphOp::Custom {
+                lower: lower_matmul_recursive::<B>,
+                arity: 2,
+                need_dims: true,
+                stable_iter: false,
+                auto_save: true,
+                save,
+                valid_shape,
+                display: |inputs| format!("{:?} @ {:?}", inputs[0], inputs[1]),
+                iter_space: vec![true, true],
+                valid_dispatch: DispatchOptions::Any,
+            },
+            vec![a, b],
+            shape,
+        )
+    }
 }

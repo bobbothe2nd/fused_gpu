@@ -1,10 +1,11 @@
-use crate::dispatch::backend::{
-    Axis, DType, Graph, Kernel, LossType, Metadata, Op, Param, ParamTy, ValueState,
+use crate::dispatch::{
+    GpuBackend,
+    backend::{Axis, DType, Graph, Kernel, LossType, Metadata, Op, Param, ParamTy, ValueState},
 };
 use alloc::vec::Vec;
 
 #[inline]
-pub fn lower_loss(graph: &Graph, meta: Metadata) -> Kernel {
+pub fn lower_loss<B: GpuBackend + Clone>(graph: &Graph<B>, meta: Metadata) -> Kernel {
     let root = graph.nodes.len() - 1;
     let root_node = &graph.nodes[root];
 

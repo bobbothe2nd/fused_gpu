@@ -1,39 +1,24 @@
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend,
-        backend::{
-            Axis, DType, Graph, GraphOp, Metadata, Node, NodeId, Op, Param, ParamId, ParamTy,
-            ValueId, ValueState,
-            kernel::{
-                Dependencies, Kernel, NodeInput, SaveIndicator, TILE_SIZE,
-                matmul::lower_matmul_recursive,
-            },
+        CompilationOptions, GpuBackend, backend::{
+            Axis, DType, DispatchOptions, Graph, GraphOp, Metadata, Node, NodeId, Op, Param, ParamId, ParamTy, ValueId, ValueState, kernel::{Dependencies, Kernel, NodeInput, SaveIndicator},
         },
-    },
-    errors::{Error, ErrorKind},
+    }, errors::{Error, ErrorKind},
 };
 use alloc::{vec, vec::Vec};
 
 const MAX_KERNEL_DEPTH: usize = 10;
 
 #[inline]
-pub fn lower_backward<B: GpuBackend>(
-    graph: &Graph,
+pub fn lower_backward<B: GpuBackend + Clone>(
+    graph: &Graph<B>,
     meta: Metadata,
     saved: &[SaveIndicator],
     options: &CompilationOptions<B>,
 ) -> Result<Vec<Dependencies<Kernel>>, Error> {
-    let block = if graph
-        .nodes
-        .iter()
-        .all(|x| x.op.is_elementwise() || x.op.is_leaf())
-    {
-        [256, 1, 1]
-    } else {
-        [16, 16, 1]
-    };
+    let tile_size = options.opt.tile_size;
 
-    let shared_size = block.iter().product::<u32>();
+    let shared_size = tile_size * tile_size;
 
     let mut params = Vec::new();
 
@@ -64,7 +49,7 @@ pub fn lower_backward<B: GpuBackend>(
     let mut saved_params = vec![None; graph.nodes.len()];
 
     for (node_id, param) in saved_params.iter_mut().enumerate() {
-        if graph.nodes[node_id].op == GraphOp::Input {
+        if matches!(graph.nodes[node_id].op, GraphOp::Input) {
             let pid = params.len();
             *param = Some(pid);
 
@@ -95,7 +80,7 @@ pub fn lower_backward<B: GpuBackend>(
         .iter()
         .enumerate()
         .filter_map(|(node_id, node)| {
-            if node.op == GraphOp::Input {
+            if matches!(node.op, GraphOp::Input) {
                 Some(node_id)
             } else {
                 None
@@ -128,14 +113,14 @@ pub fn lower_backward<B: GpuBackend>(
                 }
 
                 let (mut kernel, base, gid) =
-                    gen_kernel(meta, params.clone(), block, root, root_node);
+                    gen_kernel(meta, params.clone(), [tile_size, tile_size, 1], root, root_node);
 
-                let upstream = kernel.def_var(DType::Float, ValueState::Mut, None);
+                let upstream = kernel.def_var(DType::Float, ValueState::Mut, Some(Op::ConstF32 { value: 0.0 }));
 
                 let tile_size = kernel.def_var(
                     DType::UnsignedInt,
-                    ValueState::Immut,
-                    Some(Op::ConstU32 { value: TILE_SIZE }),
+                    ValueState::Const,
+                    Some(Op::ConstU32 { value: tile_size }),
                 );
                 let local_row = kernel.def_var(
                     DType::UnsignedInt,
@@ -148,7 +133,7 @@ pub fn lower_backward<B: GpuBackend>(
                     Some(Op::LocalId { axis: Axis::X }),
                 );
 
-                let mut new_roots = eval_grad::<B>(
+                let new_roots = eval_grad::<B>(
                     root,
                     input,
                     &NodeInput::Node(root),
@@ -168,14 +153,40 @@ pub fn lower_backward<B: GpuBackend>(
                     options,
                 )?;
 
-                roots.append(&mut new_roots);
-
                 let pid = grad_params[root].ok_or(Error {
                     msg: "grad param could not be materialized",
                     kind: ErrorKind::ParamNotMaterialized,
                     ctx: (),
                 })?;
                 kernel.param_store(pid, gid, upstream);
+
+                for root in &new_roots[1..] {
+                    let node = &graph.nodes[*root];
+
+                    if let GraphOp::Custom { valid_dispatch, .. } = node.op {
+                        match valid_dispatch {
+                            DispatchOptions::Any => {}
+
+                            DispatchOptions::ReqRow => {
+                                kernel.block = [1, shared_size, 1];
+                            }
+
+                            DispatchOptions::ReqCol => {
+                                kernel.block = [shared_size, 1, 1];
+                            }
+
+                            DispatchOptions::ReqRowCol => {
+                                kernel.block = [1, 1, 1];
+                            }
+                        }
+                    }
+
+                    if roots.contains(root) {
+                        continue;
+                    }
+
+                    roots.push(*root);
+                }
 
                 for kernel in &mut grad_kernels {
                     if kernel.val.root < root {
@@ -198,36 +209,13 @@ pub fn lower_backward<B: GpuBackend>(
     Ok(kernels)
 }
 
-#[inline]
-fn load_value(
-    kernel: &mut Kernel,
-    params: &[Option<ParamId>],
-    index: ValueId,
-    node: NodeId,
-    dtype: DType,
-) -> Result<ValueId, Error> {
-    let pid = params[node].ok_or(Error {
-        msg: "no saved value available",
-        kind: ErrorKind::ParamNotMaterialized,
-        ctx: (),
-    })?;
-
-    let v = kernel.def_var(
-        dtype,
-        ValueState::Immut,
-        Some(Op::Load { param: pid, index }),
-    );
-
-    Ok(v)
-}
-
-fn eval_grad<B: GpuBackend>(
+fn eval_grad<B: GpuBackend + Clone>(
     root: NodeId,
     input: NodeId,
     node_id: &NodeInput,
     upstream: ValueId,
     resolved: &mut Vec<NodeId>,
-    graph: &Graph,
+    graph: &Graph<B>,
     node_params: &[Option<ParamId>],
     saved_params: &[Option<ParamId>],
     kernel: &mut Kernel,
@@ -243,7 +231,7 @@ fn eval_grad<B: GpuBackend>(
     let node_id = match node_id {
         NodeInput::Node(node_id) => *node_id,
         NodeInput::Raw { param, shape: _ } => {
-            kernel.overwrite_var(
+            kernel.accum_var(
                 upstream,
                 Op::Load {
                     param: *param,
@@ -262,7 +250,7 @@ fn eval_grad<B: GpuBackend>(
     let node = &graph.nodes[node_id];
 
     if node.outputs.is_empty() {
-        kernel.overwrite_var(
+        kernel.accum_var(
             upstream,
             Op::Load {
                 param: 1,
@@ -273,185 +261,54 @@ fn eval_grad<B: GpuBackend>(
         return Ok(deepest);
     }
 
+    if node.op.is_transform()
+        && !stable_iteration_space
+        && !graph.nodes[node_id].outputs.is_empty()
+    {
+        let param = node_params[node_id].ok_or(Error {
+            msg: "grad root param not materialized",
+            kind: ErrorKind::ParamNotMaterialized,
+            ctx: (),
+        })?;
+        kernel.accum_var(upstream, Op::Load { param, index: idx });
+
+        return Ok(deepest);
+    }
+
     for &user in &node.outputs {
         let user_node = &graph.nodes[user];
 
-        let mut deep = match user_node.op {
-            GraphOp::Add => eval_grad(
+        if let GraphOp::Custom { lower, .. } = user_node.op {
+            let edge = graph.get_edge(node_id, user).ok_or(Error {
+                msg: "recieved invalid node edge",
+                kind: ErrorKind::UnresolvedInput,
+                ctx: (),
+            })?;
+
+            let mut deep = lower(
+                eval_grad::<B>,
                 root,
                 input,
-                &NodeInput::Node(user),
-                upstream,
                 resolved,
+                Some(edge as u8),
+                user,
                 graph,
+                upstream,
                 node_params,
                 saved_params,
                 kernel,
-                idx,
                 base,
+                idx,
                 local_row,
                 local_col,
                 shared_size,
                 tile_size,
                 stable_iteration_space,
                 options,
-            )?,
+            )?;
 
-            GraphOp::Sub => {
-                let is_rhs = graph.is_rhs_edge(node_id, user);
-
-                let g = if is_rhs {
-                    kernel.def_var(DType::Float, ValueState::Immut, None)
-                } else {
-                    upstream
-                };
-
-                let deep = eval_grad(
-                    root,
-                    input,
-                    &NodeInput::Node(user),
-                    g,
-                    resolved,
-                    graph,
-                    node_params,
-                    saved_params,
-                    kernel,
-                    idx,
-                    base,
-                    local_row,
-                    local_col,
-                    shared_size,
-                    tile_size,
-                    stable_iteration_space,
-                    options,
-                )?;
-
-                if is_rhs {
-                    kernel.overwrite_var(upstream, Op::Neg { x: g });
-                }
-
-                deep
-            }
-
-            GraphOp::Mul => {
-                let g = kernel.def_var(DType::Float, ValueState::Mut, None);
-
-                let deep = eval_grad(
-                    root,
-                    input,
-                    &NodeInput::Node(user),
-                    g,
-                    resolved,
-                    graph,
-                    node_params,
-                    saved_params,
-                    kernel,
-                    idx,
-                    base,
-                    local_row,
-                    local_col,
-                    shared_size,
-                    tile_size,
-                    stable_iteration_space,
-                    options,
-                )?;
-
-                if graph.is_lhs_edge(node_id, user) {
-                    let b =
-                        load_value(kernel, saved_params, idx, user_node.inputs[1], DType::Float)?;
-
-                    kernel.overwrite_var(upstream, Op::Mul { a: g, b });
-                } else {
-                    let a =
-                        load_value(kernel, saved_params, idx, user_node.inputs[0], DType::Float)?;
-
-                    kernel.overwrite_var(upstream, Op::Mul { a, b: g });
-                }
-
-                deep
-            }
-
-            GraphOp::Matmul => {
-                if !stable_iteration_space {
-                    let param = node_params[node_id].ok_or(Error {
-                        msg: "saved root param not materialized",
-                        kind: ErrorKind::ParamNotMaterialized,
-                        ctx: (),
-                    })?;
-
-                    kernel.overwrite_var(upstream, Op::Load { param, index: idx });
-
-                    return Ok(deepest);
-                }
-
-                let (a, b, a_t, b_t);
-
-                if graph.is_lhs_edge(node_id, user) {
-                    let param = saved_params[user_node.inputs[1]].ok_or(Error {
-                        msg: "saved input parameter could not be materialized",
-                        kind: ErrorKind::ParamNotMaterialized,
-                        ctx: (),
-                    })?;
-                    let shape = &graph.nodes[user_node.inputs[1]].shape;
-
-                    a = NodeInput::Node(user);
-                    b = NodeInput::Raw { param, shape };
-                    a_t = false;
-                    b_t = true;
-                } else {
-                    let param = saved_params[user_node.inputs[0]].ok_or(Error {
-                        msg: "saved input parameter could not be materialized",
-                        kind: ErrorKind::ParamNotMaterialized,
-                        ctx: (),
-                    })?;
-                    let shape = &graph.nodes[user_node.inputs[0]].shape;
-
-                    a = NodeInput::Raw { param, shape };
-                    b = NodeInput::Node(user);
-                    a_t = true;
-                    b_t = false;
-                }
-
-                let row = kernel.def_var(
-                    DType::UnsignedInt,
-                    ValueState::Immut,
-                    Some(Op::GlobalId { axis: Axis::Y }),
-                );
-                let col = kernel.def_var(
-                    DType::UnsignedInt,
-                    ValueState::Immut,
-                    Some(Op::GlobalId { axis: Axis::X }),
-                );
-
-                lower_matmul_recursive(
-                    eval_grad,
-                    root,
-                    input,
-                    resolved,
-                    a_t,
-                    b_t,
-                    &a,
-                    &b,
-                    graph,
-                    upstream,
-                    node_params,
-                    saved_params,
-                    kernel,
-                    base,
-                    row,
-                    col,
-                    local_row,
-                    local_col,
-                    shared_size,
-                    tile_size,
-                    options,
-                )?
-            }
-
-            _ => unimplemented!(),
-        };
-
-        deepest.append(&mut deep);
+            deepest.append(&mut deep);
+        }
     }
 
     if !resolved.contains(&node_id) {
@@ -461,12 +318,12 @@ fn eval_grad<B: GpuBackend>(
     Ok(deepest)
 }
 
-fn gen_kernel(
+fn gen_kernel<B: GpuBackend + Clone>(
     meta: Metadata,
     params: Vec<Param>,
     block: [u32; 3],
     input: NodeId,
-    root_node: &Node,
+    root_node: &Node<B>,
 ) -> (Kernel, ValueId, ValueId) {
     let mut kernel = Kernel {
         meta,
@@ -538,7 +395,7 @@ fn gen_kernel(
                 kernel.overwrite_var(gid2, Op::Mul { a: d, b: gid2 });
             }
 
-            kernel.overwrite_var(gid, Op::Add { a: gid, b: gid2 });
+            kernel.accum_var(gid, Op::CopyVar { id: gid2 });
 
             kernel.overwrite_var(total, Op::Mul { a: total, b: d });
         }

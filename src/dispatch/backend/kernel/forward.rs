@@ -1,22 +1,19 @@
+use core::cmp::Ordering;
+
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend,
-        backend::{
-            Axis, DType, Graph, GraphOp, Metadata, NodeId, Op, Param, ParamId, ParamTy, ValueId,
-            ValueState,
-            kernel::{
-                Dependencies, Kernel, NodeInput, SaveIndicator, TILE_SIZE,
-                matmul::lower_matmul_recursive,
-            },
+        CompilationOptions, GpuBackend, backend::{
+            Axis, DType, DispatchOptions, Graph, GraphOp,
+            Metadata, NodeId, Op, Param, ParamId, ParamTy,
+            ValueId, ValueState, kernel::{Dependencies, Kernel, NodeInput, SaveIndicator},
         },
-    },
-    errors::{Error, ErrorKind},
+    }, errors::{Error, ErrorKind},
 };
 use alloc::{vec, vec::Vec};
 
 #[inline]
-pub fn lower_forward<B: GpuBackend>(
-    graph: &Graph,
+pub fn lower_forward<B: GpuBackend + Clone>(
+    graph: &Graph<B>,
     meta: Metadata,
     saved: &[SaveIndicator],
     options: &CompilationOptions<B>,
@@ -31,15 +28,7 @@ pub fn lower_forward<B: GpuBackend>(
         }
     }
 
-    let block = if graph
-        .nodes
-        .iter()
-        .any(|x| matches!(x.op, GraphOp::Matmul | GraphOp::Transpose))
-    {
-        [TILE_SIZE, TILE_SIZE, 1]
-    } else {
-        [TILE_SIZE * TILE_SIZE, 1, 1]
-    };
+    let tile_size = options.opt.tile_size;
 
     let mut params = Vec::new();
 
@@ -69,7 +58,7 @@ pub fn lower_forward<B: GpuBackend>(
         for &input in &node.inputs {
             let input_node = &graph.nodes[input];
 
-            if input_node.op == GraphOp::Input {
+            if matches!(input_node.op, GraphOp::Input) {
                 ensure_param_slot(
                     &mut node_params,
                     input,
@@ -94,10 +83,6 @@ pub fn lower_forward<B: GpuBackend>(
     while roots.iter().any(|x| !graph.nodes[*x].inputs.is_empty()) {
         let depth = kernels.len();
 
-        if depth > 10 {
-            break;
-        }
-
         let roots_clone = roots.clone();
 
         roots.clear();
@@ -115,12 +100,12 @@ pub fn lower_forward<B: GpuBackend>(
                 shared: Vec::new(),
                 values: Vec::new(),
                 ops: Vec::new(),
-                block,
+                block: [tile_size, tile_size, 1],
                 root,
                 iter_space: root_node.shape.clone(),
             };
 
-            let shared_size = kernel.block.iter().product::<u32>();
+            let shared_size = tile_size * tile_size;
 
             let mut dims = Vec::new();
 
@@ -167,7 +152,7 @@ pub fn lower_forward<B: GpuBackend>(
                         kernel.overwrite_var(gid2, Op::Mul { a: total, b: gid2 });
 
                         if i == 2 {
-                            kernel.values[base].state = ValueState::Masked;
+                            kernel.update_state(base, ValueState::Masked);
                             base = gid2;
                         }
                     } else {
@@ -182,8 +167,8 @@ pub fn lower_forward<B: GpuBackend>(
 
             let tile_size = kernel.def_var(
                 DType::UnsignedInt,
-                ValueState::Immut,
-                Some(Op::ConstU32 { value: TILE_SIZE }),
+                ValueState::Const,
+                Some(Op::ConstU32 { value: tile_size }),
             );
             let local_row = kernel.def_var(
                 DType::UnsignedInt,
@@ -219,7 +204,27 @@ pub fn lower_forward<B: GpuBackend>(
             )?;
 
             for root in &new_roots[1..] {
-                if roots.contains(root) {
+                let node = &graph.nodes[*root];
+
+                if let GraphOp::Custom { valid_dispatch, .. } = node.op {
+                    match valid_dispatch {
+                        DispatchOptions::Any => {}
+
+                        DispatchOptions::ReqRow => {
+                            kernel.block = [1, shared_size, 1];
+                        }
+
+                        DispatchOptions::ReqCol => {
+                            kernel.block = [shared_size, 1, 1];
+                        }
+
+                        DispatchOptions::ReqRowCol => {
+                            kernel.block = [1, 1, 1];
+                        }
+                    }
+                }
+
+                if roots.contains(root) || resolved.contains(root) {
                     continue;
                 }
 
@@ -261,13 +266,13 @@ fn ensure_param_slot(
     })
 }
 
-fn eval_node<B: GpuBackend>(
+fn eval_node<B: GpuBackend + Clone>(
     root: NodeId,
     input: NodeId,
     node_id: &NodeInput,
     out: ValueId,
     resolved: &mut Vec<NodeId>,
-    graph: &Graph,
+    graph: &Graph<B>,
     node_params: &[Option<ParamId>],
     saved_params: &[Option<ParamId>],
     kernel: &mut Kernel,
@@ -322,67 +327,32 @@ fn eval_node<B: GpuBackend>(
             kernel.overwrite_var(out, Op::ConstU32 { value });
         }
 
-        GraphOp::Add | GraphOp::Sub | GraphOp::Mul | GraphOp::Div => {
-            let a = kernel.def_var(DType::Float, ValueState::Mut, None);
+        GraphOp::Custom {
+            lower, stable_iter, need_dims, valid_dispatch, ..
+        } => {
+            let mut least_valid_dispatch = DispatchOptions::Any;
 
-            let mut a_deep = eval_node(
-                root,
-                input,
-                &NodeInput::Node(node.inputs[0]),
-                a,
-                resolved,
-                graph,
-                node_params,
-                saved_params,
-                kernel,
-                idx,
-                base,
-                local_row,
-                local_col,
-                shared_size,
-                tile_size,
-                stable_iteration_space,
-                options,
-            )?;
+            if need_dims {
+                for resolved_id in resolved.iter() {
+                    let resolved_node = &graph.nodes[*resolved_id];
 
-            let b = kernel.def_var(DType::Float, ValueState::Mut, None);
+                    if let GraphOp::Custom { valid_dispatch, .. } = resolved_node.op
+                        && valid_dispatch > least_valid_dispatch
+                    {
+                        least_valid_dispatch = valid_dispatch;
+                    }
+                }
+            }
 
-            let mut b_deep = eval_node(
-                root,
-                input,
-                &NodeInput::Node(node.inputs[1]),
-                b,
-                resolved,
-                graph,
-                node_params,
-                saved_params,
-                kernel,
-                idx,
-                base,
-                local_row,
-                local_col,
-                shared_size,
-                tile_size,
-                stable_iteration_space,
-                options,
-            )?;
+            let dims_invalid = least_valid_dispatch.partial_cmp(&valid_dispatch)
+                .and_then(|x| Some(x != Ordering::Less))
+                .unwrap_or(true)
+                && least_valid_dispatch != DispatchOptions::Any;
 
-            let op = match node.op {
-                GraphOp::Add => Op::Add { a, b },
-                GraphOp::Sub => Op::Sub { a, b },
-                GraphOp::Mul => Op::Mul { a, b },
-                GraphOp::Div => Op::Div { a, b },
-                _ => unreachable!(),
-            };
+            if (!stable_iter && !stable_iteration_space)
+            || (need_dims && dims_invalid) {
+                std::eprintln!(" iteration space destabilized on node {node_id}");
 
-            kernel.overwrite_var(out, op);
-
-            deepest.append(&mut a_deep);
-            deepest.append(&mut b_deep);
-        }
-
-        GraphOp::Matmul => {
-            if !stable_iteration_space {
                 if !graph.nodes[node_id].outputs.is_empty() {
                     let param = saved_params[node_id].ok_or(Error {
                         msg: "saved root param not materialized",
@@ -390,55 +360,42 @@ fn eval_node<B: GpuBackend>(
                         ctx: (),
                     })?;
                     kernel.overwrite_var(out, Op::Load { param, index: idx });
+
+                    std::eprintln!("  reading param{param}");
                 }
+
+                std::eprintln!("  {dims_invalid:?}");
 
                 return Ok(deepest);
             }
 
-            let row = kernel.def_var(
-                DType::UnsignedInt,
-                ValueState::Immut,
-                Some(Op::GlobalId { axis: Axis::Y }),
-            );
-            let col = kernel.def_var(
-                DType::UnsignedInt,
-                ValueState::Immut,
-                Some(Op::GlobalId { axis: Axis::X }),
-            );
-
-            let mut matmul_deep = lower_matmul_recursive(
+            let mut deep = lower(
                 eval_node::<B>,
                 root,
                 input,
                 resolved,
-                false,
-                false,
-                &NodeInput::Node(node.inputs[0]),
-                &NodeInput::Node(node.inputs[1]),
+                None,
+                node_id,
                 graph,
                 out,
                 node_params,
                 saved_params,
                 kernel,
                 base,
-                row,
-                col,
+                idx,
                 local_row,
                 local_col,
                 shared_size,
                 tile_size,
+                stable_iteration_space,
                 options,
             )?;
 
-            deepest.append(&mut matmul_deep);
-        }
-
-        _ => {
-            unimplemented!()
+            deepest.append(&mut deep);
         }
     }
 
-    if let Some(saved) = saved_params[node_id] {
+    if let Some(saved) = saved_params[node_id] && node.op.is_auto_save() {
         kernel.param_store(saved, idx, out);
     }
 
