@@ -278,8 +278,6 @@ impl GpuBackend for GpuContext {
     ) -> Result<Self::Kernel, Error> {
         let source = generate_wgsl(src, options.debug.pretty_print_ir);
 
-        std::eprintln!("root {} = {source:?}", src.root);
-
         let shader = self.device.create_shader_module(ShaderModuleDescriptor {
             label: Some("shader"),
             source: ShaderSource::Wgsl(source.into()),
@@ -538,6 +536,15 @@ fn emit_ops(kernel: &Kernel, out: &mut String, pretty_print: bool) {
     let mut nesting = 0;
 
     for op in &kernel.ops {
+        if let Op::DefineVar { id } = op
+            && matches!(
+                kernel.values[*id].state,
+                ValueState::Inline | ValueState::Masked
+            )
+        {
+            continue;
+        }
+
         newline(pretty_print, out, nesting);
 
         if *op != Op::EndScope {
@@ -587,8 +594,38 @@ fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &Kernel) {
             let _ = write!(out, ";");
         }
 
-        Op::AccumVar { id, val } => {
+        Op::AddAssign { id, val } => {
             let _ = write!(out, "v{id} += ");
+            process_op(out, val, nesting, kernel);
+            let _ = write!(out, ";");
+        }
+
+        Op::MulAssign { id, val } => {
+            let _ = write!(out, "v{id} *= ");
+            process_op(out, val, nesting, kernel);
+            let _ = write!(out, ";");
+        }
+
+        Op::DivAssign { id, val } => {
+            let _ = write!(out, "v{id} /= ");
+            process_op(out, val, nesting, kernel);
+            let _ = write!(out, ";");
+        }
+
+        Op::SubAssign { id, val } => {
+            let _ = write!(out, "v{id} -= ");
+            process_op(out, val, nesting, kernel);
+            let _ = write!(out, ";");
+        }
+
+        Op::ShlAssign { id, val } => {
+            let _ = write!(out, "v{id} <<= ");
+            process_op(out, val, nesting, kernel);
+            let _ = write!(out, ";");
+        }
+
+        Op::ShrAssign { id, val } => {
+            let _ = write!(out, "v{id} >>= ");
             process_op(out, val, nesting, kernel);
             let _ = write!(out, ";");
         }
@@ -611,6 +648,24 @@ fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &Kernel) {
 
         Op::ReadMeta { param, field } => {
             let _ = write!(out, "param{param}.f{field}");
+        }
+
+        Op::Eq { a, b } => {
+            let _ = write!(
+                out,
+                "({}) == ({})",
+                render_val(*a, kernel),
+                render_val(*b, kernel)
+            );
+        }
+
+        Op::Ne { a, b } => {
+            let _ = write!(
+                out,
+                "({}) != ({})",
+                render_val(*a, kernel),
+                render_val(*b, kernel)
+            );
         }
 
         Op::Lt { a, b } => {
@@ -715,6 +770,24 @@ fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &Kernel) {
             );
         }
 
+        Op::Shl { a, b } => {
+            let _ = write!(
+                out,
+                "({}) << ({})",
+                render_val(*a, kernel),
+                render_val(*b, kernel)
+            );
+        }
+
+        Op::Shr { a, b } => {
+            let _ = write!(
+                out,
+                "({}) >> ({})",
+                render_val(*a, kernel),
+                render_val(*b, kernel)
+            );
+        }
+
         Op::Fma { a, b, c } => {
             let _ = write!(
                 out,
@@ -777,11 +850,11 @@ fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &Kernel) {
             let _ = write!(out, "sqrt({})", render_val(*x, kernel));
         }
 
-        Op::Load { param, index } => {
+        Op::ParamLoad { param, index } => {
             let _ = write!(out, "param{param}[{}]", render_val(*index, kernel));
         }
 
-        Op::Store {
+        Op::ParamStore {
             param,
             index,
             value,
@@ -789,6 +862,84 @@ fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &Kernel) {
             let _ = write!(
                 out,
                 "param{param}[{}] = {};",
+                render_val(*index, kernel),
+                render_val(*value, kernel)
+            );
+        }
+
+        Op::ParamAccum {
+            param,
+            index,
+            value,
+        } => {
+            let _ = write!(
+                out,
+                "param{param}[{}] += {};",
+                render_val(*index, kernel),
+                render_val(*value, kernel)
+            );
+        }
+
+        Op::ParamMul {
+            param,
+            index,
+            value,
+        } => {
+            let _ = write!(
+                out,
+                "param{param}[{}] *= {};",
+                render_val(*index, kernel),
+                render_val(*value, kernel)
+            );
+        }
+
+        Op::ParamDiv {
+            param,
+            index,
+            value,
+        } => {
+            let _ = write!(
+                out,
+                "param{param}[{}] /= {};",
+                render_val(*index, kernel),
+                render_val(*value, kernel)
+            );
+        }
+
+        Op::ParamSub {
+            param,
+            index,
+            value,
+        } => {
+            let _ = write!(
+                out,
+                "param{param}[{}] -= {};",
+                render_val(*index, kernel),
+                render_val(*value, kernel)
+            );
+        }
+
+        Op::ParamShl {
+            param,
+            index,
+            value,
+        } => {
+            let _ = write!(
+                out,
+                "param{param}[{}] <<= {};",
+                render_val(*index, kernel),
+                render_val(*value, kernel)
+            );
+        }
+
+        Op::ParamShr {
+            param,
+            index,
+            value,
+        } => {
+            let _ = write!(
+                out,
+                "param{param}[{}] >>= {};",
                 render_val(*index, kernel),
                 render_val(*value, kernel)
             );
@@ -807,6 +958,60 @@ fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &Kernel) {
             );
         }
 
+        Op::SharedAccum { mem, index, value } => {
+            let _ = write!(
+                out,
+                "shared{mem}[{}] += {};",
+                render_val(*index, kernel),
+                render_val(*value, kernel)
+            );
+        }
+
+        Op::SharedMul { mem, index, value } => {
+            let _ = write!(
+                out,
+                "shared{mem}[{}] *= {};",
+                render_val(*index, kernel),
+                render_val(*value, kernel)
+            );
+        }
+
+        Op::SharedDiv { mem, index, value } => {
+            let _ = write!(
+                out,
+                "shared{mem}[{}] /= {};",
+                render_val(*index, kernel),
+                render_val(*value, kernel)
+            );
+        }
+
+        Op::SharedSub { mem, index, value } => {
+            let _ = write!(
+                out,
+                "shared{mem}[{}] -= {};",
+                render_val(*index, kernel),
+                render_val(*value, kernel)
+            );
+        }
+
+        Op::SharedShl { mem, index, value } => {
+            let _ = write!(
+                out,
+                "shared{mem}[{}] <<= {};",
+                render_val(*index, kernel),
+                render_val(*value, kernel)
+            );
+        }
+
+        Op::SharedShr { mem, index, value } => {
+            let _ = write!(
+                out,
+                "shared{mem}[{}] >>= {};",
+                render_val(*index, kernel),
+                render_val(*value, kernel)
+            );
+        }
+
         Op::ForLoopBegin { index, end, step } => {
             let _ = write!(
                 out,
@@ -814,6 +1019,18 @@ fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &Kernel) {
                 render_val(*end, kernel),
                 render_val(*step, kernel),
             );
+            *nesting += 1;
+        }
+
+        Op::WhileLoopBegin { cond } => {
+            let _ = write!(out, "while ",);
+            process_op(out, cond, nesting, kernel);
+            let _ = write!(out, " {{",);
+            *nesting += 1;
+        }
+
+        Op::ForeverLoopBegin => {
+            let _ = write!(out, "loop {{",);
             *nesting += 1;
         }
 

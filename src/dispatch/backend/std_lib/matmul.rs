@@ -1,9 +1,13 @@
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend, backend::{
-            Axis, DType, DispatchOptions, Graph, GraphOp, Node, NodeId, Op, ParamId, ValueId, ValueState, kernel::{Kernel, NodeInput, SaveIndicator},
+        CompilationOptions, GpuBackend,
+        backend::{
+            Axis, DType, DispatchOptions, Graph, GraphOp, Node, NodeId, Op, ParamId, ValueId,
+            ValueState,
+            kernel::{Kernel, NodeInput, SaveIndicator},
         },
-    }, errors::{Error, ErrorKind, GraphErrorContext},
+    },
+    errors::{Error, ErrorKind, GraphErrorContext},
 };
 use alloc::{format, vec, vec::Vec};
 
@@ -133,6 +137,10 @@ pub fn lower_matmul_recursive<B: GpuBackend + Clone>(
             field: a_node_shape[a_node_shape.len() - 1],
         }),
     );
+
+    if backwardness.is_none() {
+        kernel.overwrite_var(out, Op::ConstF32 { value: 0.0 });
+    }
 
     forward_matmul(
         eval_node,
@@ -546,6 +554,18 @@ impl<B: GpuBackend + Clone> Graph<B> {
                     },
                 });
             }
+
+            if a.op.is_const() && b.op.is_const() {
+                errors.push(Error {
+                    msg: "binary operation has only constant inputs",
+                    kind: ErrorKind::ComputeGraphError,
+                    ctx: GraphErrorContext::CannotInferShape {
+                        node: node_id,
+                        all_hand_sides: vec![a.shape.clone(), b.shape.clone()],
+                        op: node.op.clone(),
+                    },
+                });
+            }
         }
 
         let mut shape = self.nodes[a].shape.clone();
@@ -559,10 +579,11 @@ impl<B: GpuBackend + Clone> Graph<B> {
                 need_dims: true,
                 stable_iter: false,
                 auto_save: true,
+                computes_gid: true,
+                prefer_separate: true,
                 save,
                 valid_shape,
                 display: |inputs| format!("{:?} @ {:?}", inputs[0], inputs[1]),
-                iter_space: vec![true, true],
                 valid_dispatch: DispatchOptions::Any,
             },
             vec![a, b],

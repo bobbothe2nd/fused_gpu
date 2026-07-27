@@ -1,6 +1,6 @@
 use crate::dispatch::{
     GpuBackend,
-    backend::{Axis, DType, Graph, Kernel, LossType, Metadata, Op, Param, ParamTy, ValueState},
+    backend::{Axis, DType, Graph, Kernel, Metadata, Op, Param, ParamTy, ValueState},
 };
 use alloc::vec::Vec;
 
@@ -81,7 +81,7 @@ pub fn lower_loss<B: GpuBackend + Clone>(graph: &Graph<B>, meta: Metadata) -> Ke
     );
 
     let total = dims[0];
-    kernel.update_state(total, ValueState::Mut);
+    kernel.update_var_state(total, ValueState::Mut);
 
     if dims.len() > 1 {
         let gid2 = kernel.def_var(DType::UnsignedInt, ValueState::Mut, None);
@@ -102,10 +102,21 @@ pub fn lower_loss<B: GpuBackend + Clone>(graph: &Graph<B>, meta: Metadata) -> Ke
         }
     }
 
+    let row = kernel.def_var(
+        DType::UnsignedInt,
+        ValueState::Immut,
+        Some(Op::GlobalId { axis: Axis::Y }),
+    );
+    let col = kernel.def_var(
+        DType::UnsignedInt,
+        ValueState::Immut,
+        Some(Op::GlobalId { axis: Axis::X }),
+    );
+
     let pred = kernel.def_var(
         DType::Float,
         ValueState::Immut,
-        Some(Op::Load {
+        Some(Op::ParamLoad {
             param: pred_param,
             index: gid,
         }),
@@ -113,123 +124,21 @@ pub fn lower_loss<B: GpuBackend + Clone>(graph: &Graph<B>, meta: Metadata) -> Ke
     let target = kernel.def_var(
         DType::Float,
         ValueState::Immut,
-        Some(Op::Load {
+        Some(Op::ParamLoad {
             param: target_param,
             index: gid,
         }),
     );
 
-    let loss_val;
-    let grad_val;
-
-    match graph.loss {
-        LossType::MeanSquaredError => {
-            let diff = kernel.def_var(
-                DType::Float,
-                ValueState::Immut,
-                Some(Op::Sub { a: pred, b: target }),
-            );
-
-            loss_val = kernel.def_var(
-                DType::Float,
-                ValueState::Immut,
-                Some(Op::Mul { a: diff, b: diff }),
-            );
-
-            let two = kernel.def_var(
-                DType::Float,
-                ValueState::Inline,
-                Some(Op::ConstF32 { value: 2.0 }),
-            );
-
-            grad_val = kernel.def_var(
-                DType::Float,
-                ValueState::Immut,
-                Some(Op::Mul { a: two, b: diff }),
-            );
-        }
-
-        LossType::BinaryCrossEntropy => {
-            let one = kernel.def_var(
-                DType::Float,
-                ValueState::Inline,
-                Some(Op::ConstF32 { value: 1.0 }),
-            );
-
-            let log_pred =
-                kernel.def_var(DType::Float, ValueState::Immut, Some(Op::Log { x: pred }));
-
-            let one_minus_target = kernel.def_var(
-                DType::Float,
-                ValueState::Immut,
-                Some(Op::Sub { a: one, b: target }),
-            );
-
-            let one_minus_pred = kernel.def_var(
-                DType::Float,
-                ValueState::Immut,
-                Some(Op::Sub { a: one, b: target }),
-            );
-
-            let log_one_minus_pred = kernel.def_var(
-                DType::Float,
-                ValueState::Immut,
-                Some(Op::Log { x: one_minus_pred }),
-            );
-
-            let term1 = kernel.def_var(
-                DType::Float,
-                ValueState::Immut,
-                Some(Op::Mul {
-                    a: target,
-                    b: log_pred,
-                }),
-            );
-
-            let term2 = kernel.def_var(
-                DType::Float,
-                ValueState::Immut,
-                Some(Op::Mul {
-                    a: one_minus_target,
-                    b: log_one_minus_pred,
-                }),
-            );
-
-            loss_val = kernel.def_var(
-                DType::Float,
-                ValueState::Immut,
-                Some(Op::Sub { a: term2, b: term1 }),
-            );
-
-            grad_val = kernel.def_var(
-                DType::Float,
-                ValueState::Immut,
-                Some(Op::Sub { a: pred, b: target }),
-            );
-        }
-
-        LossType::CrossEntropy => {
-            let log_pred =
-                kernel.def_var(DType::Float, ValueState::Immut, Some(Op::Log { x: pred }));
-
-            let term = kernel.def_var(
-                DType::Float,
-                ValueState::Immut,
-                Some(Op::Mul {
-                    a: target,
-                    b: log_pred,
-                }),
-            );
-
-            loss_val = kernel.def_var(DType::Float, ValueState::Immut, Some(Op::Neg { x: term }));
-
-            grad_val = kernel.def_var(
-                DType::Float,
-                ValueState::Immut,
-                Some(Op::Sub { a: pred, b: target }),
-            );
-        }
-    }
+    let (loss_val, grad_val) = (graph.loss.lower)(
+        &mut kernel,
+        pred,
+        target,
+        pred_param,
+        target_param,
+        row,
+        col,
+    );
 
     kernel.param_store(loss_param, gid, loss_val);
     kernel.param_store(grad_param, gid, grad_val);

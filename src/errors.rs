@@ -10,9 +10,9 @@ use crate::dispatch::backend::{GpuContext, GraphOp, MetaId, NodeId};
 /// Generic error type with message, type, and display.
 #[derive(Clone)]
 pub struct Error<C = ()> {
-    pub(crate) msg: &'static str,
-    pub(crate) kind: ErrorKind,
-    pub(crate) ctx: C,
+    pub msg: &'static str,
+    pub kind: ErrorKind,
+    pub ctx: C,
 }
 
 impl core::error::Error for Error {}
@@ -147,6 +147,12 @@ pub enum GraphErrorContext<B: GpuBackend + Clone = GpuContext> {
         rank: usize,
         required: usize,
     },
+
+    CannotInferShape {
+        node: NodeId,
+        all_hand_sides: Vec<Vec<MetaId>>,
+        op: GraphOp<B>,
+    },
 }
 
 impl<B: GpuBackend + Clone> Display for GraphErrorContext<B> {
@@ -209,6 +215,16 @@ impl<B: GpuBackend + Clone> Display for GraphErrorContext<B> {
                 rank,
                 required,
             } => write!(f, "rank too low at node {node} ({rank} >= {required})"),
+
+            Self::CannotInferShape {
+                node,
+                all_hand_sides,
+                op,
+            } => write!(
+                f,
+                "cannot infer shape of node {node} with op {}",
+                op.debug(all_hand_sides)
+            ),
         }
     }
 }

@@ -26,7 +26,7 @@ fn matmul_chain3_forward_backward() {
     let k = meta.new_field();
     let h = meta.new_field();
 
-    let mut graph = Graph::new(LossType::MeanSquaredError);
+    let mut graph = Graph::new(LossType::LOSS_MSE);
 
     let a = graph.input(&[m, k]);
     let b = graph.input(&[k, n]);

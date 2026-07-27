@@ -1,13 +1,17 @@
+use core::cmp::Ordering;
+
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend, backend::{
-            Axis, DType, DispatchOptions, Graph, GraphOp, Metadata, Node, NodeId, Op, Param, ParamId, ParamTy, ValueId, ValueState, kernel::{Dependencies, Kernel, NodeInput, SaveIndicator},
+        CompilationOptions, GpuBackend,
+        backend::{
+            Axis, DType, DispatchOptions, Graph, GraphOp, Metadata, Node, NodeId, Op, Param,
+            ParamId, ParamTy, ValueId, ValueState,
+            kernel::{Dependencies, Kernel, NodeInput, SaveIndicator},
         },
-    }, errors::{Error, ErrorKind},
+    },
+    errors::{Error, ErrorKind},
 };
 use alloc::{vec, vec::Vec};
-
-const MAX_KERNEL_DEPTH: usize = 10;
 
 #[inline]
 pub fn lower_backward<B: GpuBackend + Clone>(
@@ -91,12 +95,6 @@ pub fn lower_backward<B: GpuBackend + Clone>(
         let mut roots = vec![input];
 
         while !roots.iter().all(|x| graph.nodes[*x].outputs.is_empty()) {
-            let depth = grad_kernels.len();
-
-            if depth > MAX_KERNEL_DEPTH {
-                break;
-            }
-
             let roots_clone = roots.clone();
 
             roots.clear();
@@ -108,14 +106,19 @@ pub fn lower_backward<B: GpuBackend + Clone>(
 
                 let root_node = &graph.nodes[root];
 
-                if root_node.outputs.is_empty() {
-                    continue;
-                }
+                let (mut kernel, base, gid) = gen_kernel(
+                    meta,
+                    params.clone(),
+                    [tile_size, tile_size, 1],
+                    root,
+                    root_node,
+                );
 
-                let (mut kernel, base, gid) =
-                    gen_kernel(meta, params.clone(), [tile_size, tile_size, 1], root, root_node);
-
-                let upstream = kernel.def_var(DType::Float, ValueState::Mut, Some(Op::ConstF32 { value: 0.0 }));
+                let upstream = kernel.def_var(
+                    DType::Float,
+                    ValueState::Mut,
+                    Some(Op::ConstF32 { value: 0.0 }),
+                );
 
                 let tile_size = kernel.def_var(
                     DType::UnsignedInt,
@@ -153,15 +156,19 @@ pub fn lower_backward<B: GpuBackend + Clone>(
                     options,
                 )?;
 
-                let pid = grad_params[root].ok_or(Error {
-                    msg: "grad param could not be materialized",
-                    kind: ErrorKind::ParamNotMaterialized,
-                    ctx: (),
-                })?;
-                kernel.param_store(pid, gid, upstream);
+                let root_op = &graph.nodes[root].op;
 
-                for root in &new_roots[1..] {
-                    let node = &graph.nodes[*root];
+                if root_op.is_compute_gid() || root_op.is_leaf() {
+                    let pid = grad_params[root].ok_or(Error {
+                        msg: "grad param could not be materialized during invalid dispatch fusion",
+                        kind: ErrorKind::ParamNotMaterialized,
+                        ctx: (),
+                    })?;
+                    kernel.param_store(pid, gid, upstream);
+                }
+
+                for inner_root in &new_roots {
+                    let node = &graph.nodes[*inner_root];
 
                     if let GraphOp::Custom { valid_dispatch, .. } = node.op {
                         match valid_dispatch {
@@ -174,18 +181,17 @@ pub fn lower_backward<B: GpuBackend + Clone>(
                             DispatchOptions::ReqCol => {
                                 kernel.block = [shared_size, 1, 1];
                             }
-
-                            DispatchOptions::ReqRowCol => {
-                                kernel.block = [1, 1, 1];
-                            }
                         }
                     }
 
-                    if roots.contains(root) {
+                    if roots.contains(inner_root)
+                        || root == *inner_root
+                        || resolved.contains(inner_root)
+                    {
                         continue;
                     }
 
-                    roots.push(*root);
+                    roots.push(*inner_root);
                 }
 
                 for kernel in &mut grad_kernels {
@@ -233,7 +239,7 @@ fn eval_grad<B: GpuBackend + Clone>(
         NodeInput::Raw { param, shape: _ } => {
             kernel.accum_var(
                 upstream,
-                Op::Load {
+                Op::ParamLoad {
                     param: *param,
                     index: idx,
                 },
@@ -252,7 +258,7 @@ fn eval_grad<B: GpuBackend + Clone>(
     if node.outputs.is_empty() {
         kernel.accum_var(
             upstream,
-            Op::Load {
+            Op::ParamLoad {
                 param: 1,
                 index: idx,
             },
@@ -261,16 +267,34 @@ fn eval_grad<B: GpuBackend + Clone>(
         return Ok(deepest);
     }
 
-    if node.op.is_transform()
-        && !stable_iteration_space
-        && !graph.nodes[node_id].outputs.is_empty()
+    let mut least_valid_dispatch = DispatchOptions::Any;
+
+    if node.op.is_need_dims() || node.op.is_prefer_separate() {
+        for resolved_id in resolved.iter() {
+            let resolved_node = &graph.nodes[*resolved_id];
+
+            if let GraphOp::Custom { valid_dispatch, .. } = resolved_node.op
+                && valid_dispatch > least_valid_dispatch
+            {
+                least_valid_dispatch = valid_dispatch;
+            }
+        }
+    }
+
+    let dims_invalid = (least_valid_dispatch.partial_cmp(&node.op.valid_dispatch())
+        != Some(Ordering::Less))
+        && least_valid_dispatch != DispatchOptions::Any;
+
+    if (node.op.is_transform() && !stable_iteration_space)
+        || dims_invalid
+        || !(node.op.is_compute_gid() || resolved.is_empty())
     {
         let param = node_params[node_id].ok_or(Error {
             msg: "grad root param not materialized",
             kind: ErrorKind::ParamNotMaterialized,
             ctx: (),
         })?;
-        kernel.accum_var(upstream, Op::Load { param, index: idx });
+        kernel.accum_var(upstream, Op::ParamLoad { param, index: idx });
 
         return Ok(deepest);
     }
@@ -308,6 +332,12 @@ fn eval_grad<B: GpuBackend + Clone>(
             )?;
 
             deepest.append(&mut deep);
+        } else {
+            return Err(Error {
+                msg: "node output accepting no inputs",
+                kind: ErrorKind::UnresolvedOutput,
+                ctx: (),
+            });
         }
     }
 
@@ -371,7 +401,7 @@ fn gen_kernel<B: GpuBackend + Clone>(
     );
 
     let total = dims[0];
-    kernel.update_state(total, ValueState::Mut);
+    kernel.update_var_state(total, ValueState::Mut);
 
     if dims.len() > 1 {
         let gid2 = kernel.def_var(DType::UnsignedInt, ValueState::Mut, None);
@@ -388,7 +418,7 @@ fn gen_kernel<B: GpuBackend + Clone>(
                 kernel.overwrite_var(gid2, Op::Mul { a: total, b: gid2 });
 
                 if i == 2 {
-                    kernel.update_state(base, ValueState::Masked);
+                    kernel.update_var_state(base, ValueState::Masked);
                     base = gid2;
                 }
             } else {

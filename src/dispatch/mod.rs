@@ -37,14 +37,8 @@ impl<B: GpuBackend> Default for CompilationOptions<B> {
     fn default() -> Self {
         Self {
             target: B::TARGET_SPEC,
-            debug: DebugCompilationOptions {
-                pretty_print_ir: false,
-            },
-            opt: OptCompilationOptions {
-                tile_size: 16,
-                opt_passes: 0,
-                opt_level: 0,
-            },
+            debug: DebugCompilationOptions::default(),
+            opt: OptCompilationOptions::default(),
         }
     }
 }
@@ -52,13 +46,13 @@ impl<B: GpuBackend> Default for CompilationOptions<B> {
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct TargetCompilationOptions<B: GpuBackend + ?Sized> {
     /// Support for linear algebra accelerator (e.g. tensor cores)?
-    lin_acc: bool,
+    pub lin_acc: bool,
 
     /// Support for asyncronous memory loads/reads?
-    async_mem_load: bool,
+    pub async_mem_load: bool,
 
     /// Support for asyncronous memory stores/writes?
-    async_mem_store: bool,
+    pub async_mem_store: bool,
 
     _marker: PhantomData<B>,
 }
@@ -80,11 +74,29 @@ pub struct DebugCompilationOptions {
     pub pretty_print_ir: bool,
 }
 
+impl Default for DebugCompilationOptions {
+    fn default() -> Self {
+        Self {
+            pretty_print_ir: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct OptCompilationOptions {
     pub tile_size: u32,
     pub opt_passes: u8,
     pub opt_level: u8,
+}
+
+impl Default for OptCompilationOptions {
+    fn default() -> Self {
+        Self {
+            tile_size: 16,
+            opt_passes: 0,
+            opt_level: 0,
+        }
+    }
 }
 
 pub trait GpuBufferBackend: Debug + Clone {
@@ -316,11 +328,9 @@ impl<B: GpuBackend> GpuContext<B> {
                     let iter_space = build_dims(kernel.val.iteration_space(), meta);
                     let grid = calc_grid(&iter_space, *kernel.val.block());
 
-                    std::eprintln!(" call {idx} block {:?} grid {:?}", kernel.val.block(), grid);
-
                     self.inner.launch(&kernel.val, grid, &bindings);
                 }
-            };
+            }
 
             resolved.append(&mut tmp_res);
         }
@@ -488,355 +498,4 @@ pub struct AllocTensors<B: GpuBackend = backend::GpuContext> {
     pub loss_t: Tensor<B>,
 
     pub seed: Tensor<B>,
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::dispatch::{
-        CompilationOptions, GpuContext,
-        backend::{Graph, LossType, Metadata, kernel::Kernel},
-    };
-
-    #[test]
-    fn mul_add_forward_backward() {
-        let mut meta = Metadata::new();
-        let m = meta.new_field();
-        let n = meta.new_field();
-
-        let mut graph = Graph::new(LossType::MeanSquaredError);
-        let a = graph.input(&[m, n]);
-        let b = graph.input(&[m, n]);
-        let c = graph.input(&[m, n]);
-
-        let x = graph.mul(a, b);
-        graph.add(c, x);
-
-        let saved = Kernel::compute_saved_nodes(&graph);
-        let options = CompilationOptions::default();
-
-        let ctx = pollster::block_on(GpuContext::new()).unwrap();
-        graph.validate(meta).unwrap();
-        graph.topo_sort().unwrap();
-        graph.rebuild_outputs();
-        let ir = graph.lower(meta, &options, &saved).unwrap();
-        let kernels = ctx.compile(&ir, &options).unwrap();
-
-        let in_tensors = [
-            ctx.new_tensor_init(&[32, 32], &[3.0; 1024]),
-            ctx.new_tensor_init(&[32, 32], &[2.0; 1024]),
-            ctx.new_tensor_init(&[32, 32], &[1.0; 1024]),
-        ];
-
-        let meta_binding = [32, 32];
-        assert!(meta.validate_meta(&meta_binding));
-
-        let saved_tensors = ctx.alloc_tensors(&graph, &saved, &meta_binding);
-
-        let upload = ctx
-            .upload(&saved_tensors.seed, &[1_f32; 1024])
-            .unwrap();
-
-        std::eprintln!("_launch_forward_");
-        ctx.launch_forward(&kernels, &meta_binding, &in_tensors, &saved_tensors);
-
-        upload.sync();
-
-        std::eprintln!("_launch_backward_");
-        ctx.launch_backward(&kernels, &meta_binding, &in_tensors, &saved_tensors);
-
-        std::eprintln!("_download_");
-        let mut dst = [0_f32; 1024];
-
-        let out_tensor = &saved_tensors.forward_out;
-        let grad_tensors = &saved_tensors.grad_tensors;
-
-        ctx.download(&out_tensor, &mut dst).unwrap();
-        std::eprintln!("{:?}", dst);
-        assert!(dst.iter().all(|x| *x == 7.0));
-
-        ctx.download(&grad_tensors[0], &mut dst).unwrap();
-        std::eprintln!("{}", dst[0]);
-        assert!(dst.iter().all(|x| *x == 2.0));
-
-        ctx.download(&grad_tensors[1], &mut dst).unwrap();
-        std::eprintln!("{}", dst[0]);
-        assert!(dst.iter().all(|x| *x == 3.0));
-
-        ctx.download(&grad_tensors[2], &mut dst).unwrap();
-        std::eprintln!("{}", dst[0]);
-        assert!(dst.iter().all(|x| *x == 1.0));
-    }
-
-    // #[test]
-    fn matmul_div_softmax_forward_backward() {
-        let mut meta = Metadata::new();
-        let m = meta.new_field();
-        let n = meta.new_field();
-        let k = meta.new_field();
-
-        let mut graph = Graph::new(LossType::CrossEntropy);
-        let a = graph.input(&[m, k]);
-        let b = graph.input(&[k, n]);
-
-        let x = graph.matmul(a, b);
-        let s = graph.softmax(x);
-        graph.sub(s, x);
-
-        let saved = Kernel::compute_saved_nodes(&graph);
-        let options = CompilationOptions::default();
-
-        let ctx = pollster::block_on(GpuContext::new()).unwrap();
-        graph.validate(meta).unwrap();
-        graph.topo_sort().unwrap();
-        graph.rebuild_outputs();
-        let ir = graph.lower(meta, &options, &saved).unwrap();
-        let kernels = ctx.compile(&ir, &options).unwrap();
-
-        let in_tensors = [
-            ctx.new_tensor_init(&[16, 32], &[3.0; 512]),
-            ctx.new_tensor_init(&[32, 64], &[2.0; 2048]),
-        ];
-
-        let meta_binding = [16, 64, 32];
-        assert!(meta.validate_meta(&meta_binding));
-
-        let saved_tensors = ctx.alloc_tensors(&graph, &saved, &meta_binding);
-
-        ctx.launch_forward(&kernels, &meta_binding, &in_tensors, &saved_tensors);
-
-        let target = ctx.new_tensor_init(&[16, 64], &[1.0; 1024]);
-
-        ctx.launch_loss(&kernels, &meta_binding, &target, &saved_tensors);
-
-        ctx.launch_backward(&kernels, &meta_binding, &in_tensors, &saved_tensors);
-
-        let mut dst = [0_f32; 1024];
-
-        let out_tensor = &saved_tensors.forward_out;
-        let grad_tensors = &saved_tensors.grad_tensors;
-
-        ctx.download(&out_tensor, &mut dst).unwrap();
-        assert!(dst.iter().all(|x| *x == 7.0));
-
-        ctx.download(&saved_tensors.loss_t, &mut dst).unwrap();
-        assert!(dst.iter().all(|x| *x == 0.0));
-
-        ctx.download(&saved_tensors.seed, &mut dst).unwrap();
-        assert!(dst.iter().all(|x| *x == 0.0));
-
-        ctx.download(&grad_tensors[0], &mut dst).unwrap();
-        assert!(dst.iter().all(|x| *x == 2.0));
-
-        ctx.download(&grad_tensors[1], &mut dst).unwrap();
-        assert!(dst.iter().all(|x| *x == 3.0));
-    }
-
-    #[test]
-    fn matmul_add_forward_backward() {
-        const M: u32 = 32;
-        const N: u32 = 64;
-        const K: u32 = 16;
-
-        const A_VAL: f32 = 3.0;
-        const B_VAL: f32 = 2.0;
-        const C_VAL: f32 = 1.0;
-
-        let mut meta = Metadata::new();
-        let m = meta.new_field();
-        let n = meta.new_field();
-        let k = meta.new_field();
-
-        let mut graph = Graph::new(LossType::MeanSquaredError);
-        let a = graph.input(&[m, k]);
-        let b = graph.input(&[k, n]);
-        let c = graph.input(&[m, n]);
-
-        let x = graph.matmul(a, b);
-        graph.add(x, c);
-
-        let saved = Kernel::compute_saved_nodes(&graph);
-        let options = CompilationOptions::default();
-
-        let ctx = pollster::block_on(GpuContext::new()).unwrap();
-        graph.validate(meta).unwrap();
-        graph.topo_sort().unwrap();
-        graph.rebuild_outputs();
-        let ir = graph.lower(meta, &options, &saved).unwrap();
-        let kernels = ctx.compile(&ir, &options).unwrap();
-
-        let in_tensors = [
-            ctx.new_tensor_init(&[M, K], &[A_VAL; (M * K) as usize]),
-            ctx.new_tensor_init(&[K, N], &[B_VAL; (K * N) as usize]),
-            ctx.new_tensor_init(&[M, N], &[C_VAL; (M * N) as usize]),
-        ];
-
-        let meta_binding = [M, N, K];
-        assert!(meta.validate_meta(&meta_binding));
-
-        let saved_tensors = ctx.alloc_tensors(&graph, &saved, &meta_binding);
-
-        let upload = ctx
-            .upload(&saved_tensors.seed, &[1_f32; (M * N) as usize])
-            .unwrap();
-
-        ctx.launch_forward(&kernels, &meta_binding, &in_tensors, &saved_tensors);
-
-        upload.sync();
-
-        ctx.launch_backward(&kernels, &meta_binding, &in_tensors, &saved_tensors);
-
-        let mut dst = alloc::vec![0_f32; (M * N).max(M * K).max(K * N) as usize];
-
-        let out_tensor = &saved_tensors.forward_out;
-        let grad_tensors = &saved_tensors.grad_tensors;
-
-        ctx.download(&out_tensor, &mut dst).unwrap();
-        let download = &dst[..(M * N) as usize];
-        std::eprintln!("{:?}!={}", download, (A_VAL * B_VAL * K as f32) + C_VAL);
-        assert!(
-            download
-                .iter()
-                .all(|x| *x == (A_VAL * B_VAL * K as f32) + C_VAL)
-        );
-
-        ctx.download(&grad_tensors[0], &mut dst).unwrap();
-        let download = &dst[..(M * K) as usize];
-        std::eprintln!("{}!={}", download[0], B_VAL * N as f32);
-        assert!(download.iter().all(|x| *x == B_VAL * N as f32));
-
-        ctx.download(&grad_tensors[1], &mut dst).unwrap();
-        let download = &dst[..(K * N) as usize];
-        std::eprintln!("{}!={}", download[0], A_VAL * M as f32);
-        assert!(download.iter().all(|x| *x == A_VAL * M as f32));
-
-        ctx.download(&grad_tensors[2], &mut dst).unwrap();
-        let download = &dst[..(M * N) as usize];
-        assert!(download.iter().all(|x| *x == 1.0));
-    }
-
-    #[test]
-    fn matmul_chain3_forward_backward() {
-        const M: u32 = 32;
-        const N: u32 = 64;
-        const K: u32 = 128;
-        const H: u32 = 256;
-
-        const A_VAL: f32 = 3.0;
-        const B_VAL: f32 = 2.0;
-        const C_VAL: f32 = 1.0;
-        const D_VAL: f32 = 0.5;
-        const E_VAL: f32 = 1.0;
-        const X_VAL: f32 = A_VAL * B_VAL * K as f32;
-        const Y_VAL: f32 = C_VAL * X_VAL * M as f32;
-        const Z_VAL: f32 = Y_VAL * D_VAL * N as f32;
-        const Y_GRAD: f32 = D_VAL * H as f32;
-        const X_GRAD: f32 = Y_GRAD * C_VAL * H as f32;
-        const D_GRAD: f32 = Y_VAL * H as f32;
-        const C_GRAD: f32 = Y_GRAD * X_VAL * N as f32;
-        const B_GRAD: f32 = A_VAL * X_GRAD * M as f32;
-        const A_GRAD: f32 = X_GRAD * B_VAL * N as f32;
-
-        let mut meta = Metadata::new();
-        let m = meta.new_field();
-        let n = meta.new_field();
-        let k = meta.new_field();
-        let h = meta.new_field();
-
-        let mut graph = Graph::new(LossType::MeanSquaredError);
-
-        let a = graph.input(&[m, k]);
-        let b = graph.input(&[k, n]);
-        let c = graph.input(&[h, m]);
-        let d = graph.input(&[n, h]);
-        let e = graph.input(&[h, h]);
-
-        let x = graph.matmul(a, b);
-        let y = graph.matmul(c, x);
-        let z = graph.matmul(y, d);
-        graph.add(z, e);
-
-        let saved = Kernel::compute_saved_nodes(&graph);
-        let options = CompilationOptions::default();
-
-        let ctx = pollster::block_on(GpuContext::new()).unwrap();
-        graph.validate(meta).unwrap();
-        graph.topo_sort().unwrap();
-        graph.rebuild_outputs();
-        let ir = graph.lower(meta, &options, &saved).unwrap();
-        let kernels = ctx.compile(&ir, &options).unwrap();
-
-        let in_tensors = [
-            ctx.new_tensor_init(&[M, K], &[A_VAL; (M * K) as usize]),
-            ctx.new_tensor_init(&[K, N], &[B_VAL; (K * N) as usize]),
-            ctx.new_tensor_init(&[H, M], &[C_VAL; (H * M) as usize]),
-            ctx.new_tensor_init(&[N, H], &[D_VAL; (N * H) as usize]),
-            ctx.new_tensor_init(&[H, H], &[E_VAL; (H * H) as usize]),
-        ];
-
-        let meta_binding = [M, N, K, H];
-        assert!(meta.validate_meta(&meta_binding));
-
-        let saved_tensors = ctx.alloc_tensors(&graph, &saved, &meta_binding);
-
-        let upload = ctx
-            .upload(&saved_tensors.seed, &[1_f32; (H * H) as usize])
-            .unwrap();
-
-        ctx.launch_forward(&kernels, &meta_binding, &in_tensors, &saved_tensors);
-
-        upload.sync();
-
-        ctx.launch_backward(&kernels, &meta_binding, &in_tensors, &saved_tensors);
-
-        let max_len = in_tensors.iter().map(|x| x.len()).max().unwrap_or(0) as usize;
-        let mut dst = alloc::vec![0.0; max_len];
-
-        let out_tensor = &saved_tensors.forward_out;
-        let grad_tensors = &saved_tensors.grad_tensors;
-        let saved_tensors = &saved_tensors.forward_saved;
-
-        ctx.download(&saved_tensors[0], &mut dst).unwrap();
-        let download = &dst[..(M * N) as usize];
-        std::eprintln!("X={:?}... {:?}?", &download[0], X_VAL);
-        assert!(download.iter().all(|x| *x == X_VAL));
-
-        ctx.download(&saved_tensors[1], &mut dst).unwrap();
-        let download = &dst[..(H * N) as usize];
-        std::eprintln!("Y={:?}... {:?}?", &download[0], Y_VAL);
-        assert!(download.iter().all(|x| *x == Y_VAL));
-
-        ctx.download(&saved_tensors[2], &mut dst).unwrap();
-        let download = &dst[..(H * H) as usize];
-        std::eprintln!("Z={:?}... {:?}?", &download[0], Z_VAL);
-        assert!(download.iter().all(|x| *x == Z_VAL));
-
-        ctx.download(&out_tensor, &mut dst).unwrap();
-        let download = &dst[..(H * H) as usize];
-        std::eprintln!("forward={:?}... {:?}?", &download[0], Z_VAL + E_VAL);
-        assert!(download.iter().all(|x| *x == Z_VAL + E_VAL));
-
-        ctx.download(&grad_tensors[0], &mut dst).unwrap();
-        let download = &dst[..(M * K) as usize];
-        std::eprintln!("dA={:?}... {:?}?", download[0], A_GRAD);
-        assert!(download.iter().all(|x| *x == A_GRAD));
-
-        ctx.download(&grad_tensors[1], &mut dst).unwrap();
-        let download = &dst[..(K * N) as usize];
-        std::eprintln!("dB={:?}... {:?}?", download[0], B_GRAD);
-        assert!(download.iter().all(|x| *x == B_GRAD));
-
-        ctx.download(&grad_tensors[2], &mut dst).unwrap();
-        let download = &dst[..(H * M) as usize];
-        std::eprintln!("dC={:?}... {:?}?", download[0], C_GRAD);
-        assert!(download.iter().all(|x| *x == C_GRAD));
-
-        ctx.download(&grad_tensors[3], &mut dst).unwrap();
-        let download = &dst[..(N * H) as usize];
-        std::eprintln!("dD={:?}... {:?}?", download[0], D_GRAD);
-        assert!(download.iter().all(|x| *x == D_GRAD));
-
-        ctx.download(&grad_tensors[4], &mut dst).unwrap();
-        let download = &dst[..(H * H) as usize];
-        assert!(download.iter().all(|x| *x == 1.0));
-    }
 }

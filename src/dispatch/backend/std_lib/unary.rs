@@ -1,9 +1,12 @@
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend, backend::{
-            DType, DispatchOptions, Graph, GraphOp, Node, NodeId, Op, ParamId, ValueId, ValueState, kernel::{Kernel, NodeInput, SaveIndicator},
+        CompilationOptions, GpuBackend,
+        backend::{
+            DType, DispatchOptions, Graph, GraphOp, Node, NodeId, Op, ParamId, ValueId, ValueState,
+            kernel::{Kernel, NodeInput, SaveIndicator},
         },
-    }, errors::{Error, ErrorKind, GraphErrorContext},
+    },
+    errors::{Error, ErrorKind, GraphErrorContext},
 };
 
 use alloc::{format, vec, vec::Vec};
@@ -244,7 +247,8 @@ impl<B: GpuBackend + Clone> Graph<B> {
                 need_dims: false,
                 stable_iter: true,
                 auto_save: true,
-                iter_space: vec![true, true],
+                computes_gid: true,
+                prefer_separate: false,
                 valid_dispatch: DispatchOptions::Any,
             },
             vec![x],
@@ -294,7 +298,8 @@ impl<B: GpuBackend + Clone> Graph<B> {
                 need_dims: false,
                 stable_iter: true,
                 auto_save: true,
-                iter_space: vec![true, true],
+                computes_gid: true,
+                prefer_separate: false,
                 valid_dispatch: DispatchOptions::Any,
             },
             vec![x],
@@ -392,7 +397,8 @@ impl<B: GpuBackend + Clone> Graph<B> {
                 need_dims: false,
                 stable_iter: true,
                 auto_save: true,
-                iter_space: vec![true, true],
+                computes_gid: true,
+                prefer_separate: false,
                 valid_dispatch: DispatchOptions::Any,
             },
             vec![x],
@@ -439,7 +445,8 @@ impl<B: GpuBackend + Clone> Graph<B> {
                 need_dims: false,
                 stable_iter: true,
                 auto_save: true,
-                iter_space: vec![true, true],
+                computes_gid: true,
+                prefer_separate: false,
                 valid_dispatch: DispatchOptions::Any,
             },
             vec![x],
@@ -508,7 +515,10 @@ impl<B: GpuBackend + Clone> Graph<B> {
                         let b_x_plus_a_x3 = kernel.def_var(
                             DType::Float,
                             ValueState::Inline,
-                            Some(Op::Mul { a: gelu_b, b: x_plus_a_x3 }),
+                            Some(Op::Mul {
+                                a: gelu_b,
+                                b: x_plus_a_x3,
+                            }),
                         );
 
                         let tanh_u = kernel.def_var(
@@ -529,7 +539,13 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             Some(Op::Mul { a: half, b: inp }),
                         );
 
-                        kernel.overwrite_var(out, Op::Mul { a: half_x, b: one_plus_tanh_u });
+                        kernel.overwrite_var(
+                            out,
+                            Op::Mul {
+                                a: half_x,
+                                b: one_plus_tanh_u,
+                            },
+                        );
 
                         tanh_u
                     },
@@ -566,7 +582,10 @@ impl<B: GpuBackend + Clone> Graph<B> {
                         let gelu_c = kernel.def_var(
                             DType::Float,
                             ValueState::Const,
-                            Some(Op::Mul { a: gelu_a, b: three }),
+                            Some(Op::Mul {
+                                a: gelu_a,
+                                b: three,
+                            }),
                         );
 
                         let xx = kernel.def_var(
@@ -608,7 +627,10 @@ impl<B: GpuBackend + Clone> Graph<B> {
                         let du_dx = kernel.def_var(
                             DType::Float,
                             ValueState::Immut,
-                            Some(Op::Mul { a: gelu_b, b: one_plus_c_xx }),
+                            Some(Op::Mul {
+                                a: gelu_b,
+                                b: one_plus_c_xx,
+                            }),
                         );
 
                         let x_du_dx = kernel.def_var(
@@ -620,22 +642,37 @@ impl<B: GpuBackend + Clone> Graph<B> {
                         let one_minus_tt_x_du_dx = kernel.def_var(
                             DType::Float,
                             ValueState::Immut,
-                            Some(Op::Mul { a: one_minus_tt, b: x_du_dx }),
+                            Some(Op::Mul {
+                                a: one_minus_tt,
+                                b: x_du_dx,
+                            }),
                         );
 
                         let two_dy_dx = kernel.def_var(
                             DType::Float,
                             ValueState::Immut,
-                            Some(Op::Add { a: one_plus_t, b: one_minus_tt_x_du_dx }),
+                            Some(Op::Add {
+                                a: one_plus_t,
+                                b: one_minus_tt_x_du_dx,
+                            }),
                         );
 
                         let dy_dx = kernel.def_var(
                             DType::Float,
                             ValueState::Immut,
-                            Some(Op::Mul { a: half, b: two_dy_dx }),
+                            Some(Op::Mul {
+                                a: half,
+                                b: two_dy_dx,
+                            }),
                         );
 
-                        kernel.accum_var(out, Op::Mul { a: upstream, b: dy_dx });
+                        kernel.accum_var(
+                            out,
+                            Op::Mul {
+                                a: upstream,
+                                b: dy_dx,
+                            },
+                        );
                     },
                     0
                 ),
@@ -645,8 +682,9 @@ impl<B: GpuBackend + Clone> Graph<B> {
                 arity: 1,
                 need_dims: false,
                 stable_iter: true,
-                iter_space: vec![true, true],
                 auto_save: false,
+                computes_gid: true,
+                prefer_separate: true,
                 valid_dispatch: DispatchOptions::Any,
             },
             vec![x],
@@ -677,7 +715,8 @@ impl<B: GpuBackend + Clone> Graph<B> {
                 need_dims: false,
                 stable_iter: true,
                 auto_save: true,
-                iter_space: vec![true, true],
+                computes_gid: true,
+                prefer_separate: false,
                 valid_dispatch: DispatchOptions::Any,
             },
             vec![x],
@@ -734,7 +773,8 @@ impl<B: GpuBackend + Clone> Graph<B> {
                 need_dims: false,
                 stable_iter: true,
                 auto_save: true,
-                iter_space: vec![true, true],
+                computes_gid: true,
+                prefer_separate: false,
                 valid_dispatch: DispatchOptions::Any,
             },
             vec![x],
@@ -766,7 +806,8 @@ impl<B: GpuBackend + Clone> Graph<B> {
                 need_dims: false,
                 stable_iter: true,
                 auto_save: true,
-                iter_space: vec![true, true],
+                computes_gid: true,
+                prefer_separate: false,
                 valid_dispatch: DispatchOptions::Any,
             },
             vec![x],

@@ -2,12 +2,14 @@ use core::cmp::Ordering;
 
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend, backend::{
-            Axis, DType, DispatchOptions, Graph, GraphOp,
-            Metadata, NodeId, Op, Param, ParamId, ParamTy,
-            ValueId, ValueState, kernel::{Dependencies, Kernel, NodeInput, SaveIndicator},
+        CompilationOptions, GpuBackend,
+        backend::{
+            Axis, DType, DispatchOptions, Graph, GraphOp, Metadata, NodeId, Op, Param, ParamId,
+            ParamTy, ValueId, ValueState,
+            kernel::{Dependencies, Kernel, NodeInput, SaveIndicator},
         },
-    }, errors::{Error, ErrorKind},
+    },
+    errors::{Error, ErrorKind},
 };
 use alloc::{vec, vec::Vec};
 
@@ -73,6 +75,8 @@ pub fn lower_forward<B: GpuBackend + Clone>(
     }
 
     let output_param = params.len();
+    node_params[graph.nodes.len() - 1] = Some(output_param);
+
     params.push(Param {
         dtype: DType::Float,
         ty: ParamTy::ReadWrite,
@@ -135,7 +139,7 @@ pub fn lower_forward<B: GpuBackend + Clone>(
             );
 
             let total = dims[0];
-            kernel.update_state(total, ValueState::Mut);
+            kernel.update_var_state(total, ValueState::Mut);
 
             if dims.len() > 1 {
                 let gid2 = kernel.def_var(DType::UnsignedInt, ValueState::Mut, None);
@@ -152,7 +156,7 @@ pub fn lower_forward<B: GpuBackend + Clone>(
                         kernel.overwrite_var(gid2, Op::Mul { a: total, b: gid2 });
 
                         if i == 2 {
-                            kernel.update_state(base, ValueState::Masked);
+                            kernel.update_var_state(base, ValueState::Masked);
                             base = gid2;
                         }
                     } else {
@@ -203,8 +207,8 @@ pub fn lower_forward<B: GpuBackend + Clone>(
                 options,
             )?;
 
-            for root in &new_roots[1..] {
-                let node = &graph.nodes[*root];
+            for inner_root in &new_roots {
+                let node = &graph.nodes[*inner_root];
 
                 if let GraphOp::Custom { valid_dispatch, .. } = node.op {
                     match valid_dispatch {
@@ -217,21 +221,17 @@ pub fn lower_forward<B: GpuBackend + Clone>(
                         DispatchOptions::ReqCol => {
                             kernel.block = [shared_size, 1, 1];
                         }
-
-                        DispatchOptions::ReqRowCol => {
-                            kernel.block = [1, 1, 1];
-                        }
                     }
                 }
 
-                if roots.contains(root) || resolved.contains(root) {
+                if roots.contains(inner_root) || root == *inner_root {
                     continue;
                 }
 
-                roots.push(*root);
+                roots.push(*inner_root);
             }
 
-            if depth == 0 {
+            if depth == 0 && graph.nodes[kernel.root].op.is_compute_gid() {
                 kernel.param_store(output_param, gid, out);
             }
 
@@ -312,27 +312,25 @@ fn eval_node<B: GpuBackend + Clone>(
                 ctx: (),
             })?;
 
-            kernel.overwrite_var(out, Op::Load { param, index: idx });
+            kernel.overwrite_var(out, Op::ParamLoad { param, index: idx });
         }
 
         GraphOp::ConstF32(value) => {
             kernel.overwrite_var(out, Op::ConstF32 { value });
         }
 
-        GraphOp::ConstI32(value) => {
-            kernel.overwrite_var(out, Op::ConstI32 { value });
-        }
-
-        GraphOp::ConstU32(value) => {
-            kernel.overwrite_var(out, Op::ConstU32 { value });
-        }
-
         GraphOp::Custom {
-            lower, stable_iter, need_dims, valid_dispatch, ..
+            lower,
+            stable_iter,
+            need_dims,
+            valid_dispatch,
+            computes_gid,
+            prefer_separate,
+            ..
         } => {
             let mut least_valid_dispatch = DispatchOptions::Any;
 
-            if need_dims {
+            if need_dims || prefer_separate {
                 for resolved_id in resolved.iter() {
                     let resolved_node = &graph.nodes[*resolved_id];
 
@@ -344,27 +342,20 @@ fn eval_node<B: GpuBackend + Clone>(
                 }
             }
 
-            let dims_invalid = least_valid_dispatch.partial_cmp(&valid_dispatch)
-                .and_then(|x| Some(x != Ordering::Less))
-                .unwrap_or(true)
+            let dims_invalid = (least_valid_dispatch.partial_cmp(&valid_dispatch)
+                != Some(Ordering::Less))
                 && least_valid_dispatch != DispatchOptions::Any;
 
-            if (!stable_iter && !stable_iteration_space)
-            || (need_dims && dims_invalid) {
-                std::eprintln!(" iteration space destabilized on node {node_id}");
-
-                if !graph.nodes[node_id].outputs.is_empty() {
-                    let param = saved_params[node_id].ok_or(Error {
-                        msg: "saved root param not materialized",
-                        kind: ErrorKind::ParamNotMaterialized,
-                        ctx: (),
-                    })?;
-                    kernel.overwrite_var(out, Op::Load { param, index: idx });
-
-                    std::eprintln!("  reading param{param}");
-                }
-
-                std::eprintln!("  {dims_invalid:?}");
+            if !(stable_iter || stable_iteration_space)
+                || dims_invalid
+                || !(computes_gid || resolved.is_empty())
+            {
+                let param = saved_params[node_id].ok_or(Error {
+                    msg: "saved root param not materialized",
+                    kind: ErrorKind::ParamNotMaterialized,
+                    ctx: (),
+                })?;
+                kernel.overwrite_var(out, Op::ParamLoad { param, index: idx });
 
                 return Ok(deepest);
             }
@@ -395,7 +386,9 @@ fn eval_node<B: GpuBackend + Clone>(
         }
     }
 
-    if let Some(saved) = saved_params[node_id] && node.op.is_auto_save() {
+    if let Some(saved) = saved_params[node_id]
+        && node.op.is_auto_save()
+    {
         kernel.param_store(saved, idx, out);
     }
 

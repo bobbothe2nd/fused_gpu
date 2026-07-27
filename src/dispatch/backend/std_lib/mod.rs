@@ -1,4 +1,5 @@
+mod basic_loss;
 mod binary;
-mod unary;
 mod matmul;
 mod softmax;
+mod unary;

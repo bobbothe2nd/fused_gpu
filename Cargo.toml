@@ -20,17 +20,19 @@ codegen-units = 1
 debug = false
 
 [features]
-default = ["wgsl"]
+default = ["wgsl", "standard_ops"]
 
 std = []
-cuda = ["std"]
-rocm = ["std"]
 wgsl = ["std", "dep:wgpu"]
 standard_ops = []
 
 [[example]]
 name = "matmul_chain3"
-required-features = []
+required-features = ["standard_ops", "wgsl"]
+
+[[test]]
+name = "std_wgsl"
+required-features = ["standard_ops", "wgsl"]
 
 [dependencies]
 briny = "0.4.1"

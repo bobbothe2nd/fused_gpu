@@ -21,21 +21,34 @@ pub(crate) fn build_dims(shape: &[MetaId], meta: &[u32]) -> Vec<u32> {
 pub(crate) fn calc_grid(shape: &[u32], block: [u32; 3]) -> [u32; 3] {
     let out_rank = shape.len();
 
-    let (b, n, m) = if block[1] == 1 {
-        (1, shape.iter().product(), 1)
-    } else {
-        (
-            shape[..out_rank - 2].iter().product::<u32>(),
+    if block[0] == block[1] {
+        [
+            shape[out_rank - 1].div_ceil(block[0]),
+            shape[out_rank - 2].div_ceil(block[1]),
+            shape[..out_rank - 2]
+                .iter()
+                .product::<u32>()
+                .div_ceil(block[2]),
+        ]
+    } else if block[0] == 1 {
+        [
+            1,
             shape[out_rank - 1],
+            shape[..out_rank - 2]
+                .iter()
+                .product::<u32>()
+                .div_ceil(block[2]),
+        ]
+    } else {
+        [
             shape[out_rank - 2],
-        )
-    };
-
-    [
-        n.div_ceil(block[0]),
-        m.div_ceil(block[1]),
-        b.div_ceil(block[2]),
-    ]
+            1,
+            shape[..out_rank - 2]
+                .iter()
+                .product::<u32>()
+                .div_ceil(block[2]),
+        ]
+    }
 }
 
 #[derive(Debug, Clone)]

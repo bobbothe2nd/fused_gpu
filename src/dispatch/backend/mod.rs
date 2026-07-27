@@ -3,42 +3,146 @@ use core::{cmp::Ordering, fmt::Debug};
 
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend,
+        CompilationOptions, GpuBackend, GpuBufferBackend, GpuKernelBackend,
+        TargetCompilationOptions,
         backend::kernel::{Kernel, KernelGroup, NodeInput, SaveIndicator},
     },
     errors::{Error, ErrorKind, GraphErrorContext},
 };
 
+#[cfg(feature = "standard_ops")]
 mod std_lib;
 
 pub mod kernel;
 
-#[cfg(feature = "cuda")]
-pub mod cuda;
-
-#[cfg(feature = "rocm")]
-pub mod rocm;
-
 #[cfg(feature = "wgsl")]
 pub mod wgsl;
 
-#[cfg(all(feature = "wgsl", not(any(feature = "rocm", feature = "cuda"))))]
-pub type GpuBuffer = wgsl::GpuBuffer;
-
-#[cfg(all(feature = "rocm", not(feature = "cuda")))]
-pub type GpuBuffer = rocm::GpuBuffer;
-
-#[cfg(feature = "cuda")]
-pub type GpuBuffer = cuda::GpuBuffer;
-
-#[cfg(all(feature = "wgsl", not(any(feature = "rocm", feature = "cuda"))))]
+#[cfg(feature = "wgsl")]
 pub type GpuContext = wgsl::GpuContext;
+#[cfg(not(feature = "wgsl"))]
+pub type GpuContext = NopGpuContext;
 
-#[cfg(all(feature = "rocm", not(feature = "cuda")))]
-pub type GpuContext = rocm::GpuContext;
+#[cfg(feature = "wgsl")]
+pub type GpuBuffer = wgsl::GpuBuffer;
+#[cfg(not(feature = "wgsl"))]
+pub type GpuBuffer = NopGpuBuffer;
 
-#[cfg(feature = "cuda")]
-pub type GpuContext = cuda::GpuContext;
+#[derive(Debug, Clone)]
+pub struct NopGpuBuffer;
+
+impl GpuBufferBackend for NopGpuBuffer {
+    fn size(&self) -> u32 {
+        0
+    }
+
+    fn size_bytes(&self) -> u32 {
+        0
+    }
+}
+
+pub struct NopGpuKernel;
+
+impl GpuKernelBackend for NopGpuKernel {
+    fn block(&self) -> &[u32; 3] {
+        &[0, 0, 0]
+    }
+
+    fn iteration_space(&self) -> &[MetaId] {
+        &[]
+    }
+}
+
+#[derive(Clone)]
+pub struct NopGpuContext;
+
+impl NopGpuContext {
+    #[allow(clippy::unused_async)]
+    pub async fn new() -> Result<Self, Error> {
+        Err(Error {
+            msg: "using nop backend",
+            kind: ErrorKind::UnsupportedFeature,
+            ctx: (),
+        })
+    }
+}
+
+impl GpuBackend for NopGpuContext {
+    type Buffer = NopGpuBuffer;
+    type Kernel = NopGpuKernel;
+    type ParamLayout = ();
+    type SubmissionIndex = ();
+
+    const TARGET_SPEC: TargetCompilationOptions<Self> =
+        TargetCompilationOptions::new(false, false, false);
+
+    fn alloc(&self, _len: usize) -> Self::Buffer {
+        NopGpuBuffer
+    }
+
+    fn alloc_init(&self, _data: &[u8]) -> Self::Buffer {
+        NopGpuBuffer
+    }
+
+    fn alloc_meta(&self, _data: &[u32]) -> Self::Buffer {
+        NopGpuBuffer
+    }
+
+    fn compile(
+        &self,
+        _src: &Kernel,
+        _params: &Self::ParamLayout,
+        _options: &CompilationOptions<Self>,
+    ) -> Result<Self::Kernel, Error> {
+        Err(Error {
+            msg: "using nop backend",
+            kind: ErrorKind::UnsupportedFeature,
+            ctx: (),
+        })
+    }
+
+    fn download(&self, _buffer: &Self::Buffer, _out: &mut [u8]) -> Result<(), Error> {
+        Err(Error {
+            msg: "using nop backend",
+            kind: ErrorKind::UnsupportedFeature,
+            ctx: (),
+        })
+    }
+
+    fn init_params(
+        &self,
+        _src: &[Param],
+        _options: &CompilationOptions<Self>,
+    ) -> Result<Self::ParamLayout, Error> {
+        Err(Error {
+            msg: "using nop backend",
+            kind: ErrorKind::UnsupportedFeature,
+            ctx: (),
+        })
+    }
+
+    fn launch(
+        &self,
+        _kernel: &Self::Kernel,
+        _wg: [u32; 3],
+        _bindings: &[&Self::Buffer],
+    ) -> Self::SubmissionIndex {
+    }
+
+    fn poll(&self) -> super::PollStatus {
+        super::PollStatus::Failed
+    }
+
+    fn sync(&self, _submission_index: Self::SubmissionIndex) {}
+
+    fn upload(&self, _buffer: &Self::Buffer, _data: &[u8]) -> Result<Self::SubmissionIndex, Error> {
+        Err(Error {
+            msg: "using nop backend",
+            kind: ErrorKind::UnsupportedFeature,
+            ctx: (),
+        })
+    }
+}
 
 /// Identifier of a node in a graph.
 pub type NodeId = usize;
@@ -144,7 +248,27 @@ pub enum Op {
         id: ValueId,
         val: Box<Self>,
     },
-    AccumVar {
+    AddAssign {
+        id: ValueId,
+        val: Box<Self>,
+    },
+    MulAssign {
+        id: ValueId,
+        val: Box<Self>,
+    },
+    DivAssign {
+        id: ValueId,
+        val: Box<Self>,
+    },
+    SubAssign {
+        id: ValueId,
+        val: Box<Self>,
+    },
+    ShlAssign {
+        id: ValueId,
+        val: Box<Self>,
+    },
+    ShrAssign {
         id: ValueId,
         val: Box<Self>,
     },
@@ -202,6 +326,16 @@ pub enum Op {
         b: ValueId,
     },
 
+    Shl {
+        a: ValueId,
+        b: ValueId,
+    },
+
+    Shr {
+        a: ValueId,
+        b: ValueId,
+    },
+
     /// (Fused) Operation `a * b + c`
     Fma {
         a: ValueId,
@@ -228,11 +362,41 @@ pub enum Op {
         x: ValueId,
     },
 
-    Load {
+    ParamLoad {
         param: ParamId,
         index: ValueId,
     },
-    Store {
+    ParamStore {
+        param: ParamId,
+        index: ValueId,
+        value: ValueId,
+    },
+    ParamAccum {
+        param: ParamId,
+        index: ValueId,
+        value: ValueId,
+    },
+    ParamMul {
+        param: ParamId,
+        index: ValueId,
+        value: ValueId,
+    },
+    ParamDiv {
+        param: ParamId,
+        index: ValueId,
+        value: ValueId,
+    },
+    ParamSub {
+        param: ParamId,
+        index: ValueId,
+        value: ValueId,
+    },
+    ParamShl {
+        param: ParamId,
+        index: ValueId,
+        value: ValueId,
+    },
+    ParamShr {
         param: ParamId,
         index: ValueId,
         value: ValueId,
@@ -246,6 +410,46 @@ pub enum Op {
         mem: SharedId,
         index: ValueId,
         value: ValueId,
+    },
+    SharedAccum {
+        mem: SharedId,
+        index: ValueId,
+        value: ValueId,
+    },
+    SharedMul {
+        mem: SharedId,
+        index: ValueId,
+        value: ValueId,
+    },
+    SharedDiv {
+        mem: SharedId,
+        index: ValueId,
+        value: ValueId,
+    },
+    SharedSub {
+        mem: SharedId,
+        index: ValueId,
+        value: ValueId,
+    },
+    SharedShl {
+        mem: SharedId,
+        index: ValueId,
+        value: ValueId,
+    },
+    SharedShr {
+        mem: SharedId,
+        index: ValueId,
+        value: ValueId,
+    },
+
+    Eq {
+        a: ValueId,
+        b: ValueId,
+    },
+
+    Ne {
+        a: ValueId,
+        b: ValueId,
     },
 
     Lt {
@@ -289,6 +493,12 @@ pub enum Op {
         step: ValueId,
     },
 
+    WhileLoopBegin {
+        cond: Box<Self>,
+    },
+
+    ForeverLoopBegin,
+
     Continue,
 
     Break,
@@ -308,18 +518,32 @@ pub enum Op {
 
 #[derive(Debug, Clone)]
 pub struct Node<B: GpuBackend + Clone = GpuContext> {
-    pub(crate) op: GraphOp<B>,
-    pub(crate) inputs: Vec<NodeId>,
-    pub(crate) outputs: Vec<NodeId>,
-    pub(crate) shape: Vec<MetaId>,
+    pub op: GraphOp<B>,
+    pub inputs: Vec<NodeId>,
+    pub outputs: Vec<NodeId>,
+    pub shape: Vec<MetaId>,
 }
 
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LossType {
-    MeanSquaredError,
-    CrossEntropy,
-    BinaryCrossEntropy,
+#[derive(Debug, Clone, Copy, Hash)]
+pub struct LossType {
+    /// Signature:
+    /// ```ignore
+    /// fn(
+    ///     kernel: &mut Kernel,
+    ///     pred: ValueId,
+    ///     target: ValueId,
+    ///     pred_param: ParamId,
+    ///     target_param: ParamId,
+    ///     row: ValueId,
+    ///     col: ValueId,
+    /// ) -> (
+    ///     loss_val: ValueId,
+    ///     grad_val: ValueId
+    /// )
+    /// ```
+    pub lower:
+        fn(&mut Kernel, ValueId, ValueId, ParamId, ParamId, ValueId, ValueId) -> (ValueId, ValueId),
 }
 
 #[derive(Debug, Default, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -370,24 +594,23 @@ pub enum DispatchOptions {
     Any,
     ReqRow,
     ReqCol,
-    ReqRowCol,
 }
 
 impl PartialOrd for DispatchOptions {
     fn ge(&self, other: &Self) -> bool {
-        self == other || *self == Self::ReqRowCol || *other != Self::ReqRowCol
+        self == other
     }
 
     fn gt(&self, other: &Self) -> bool {
-        *self == Self::ReqRowCol || *other != Self::ReqRowCol
+        *self != Self::Any && *other == Self::Any
     }
 
     fn le(&self, other: &Self) -> bool {
-        self == other || *self != Self::ReqRowCol || *other == Self::ReqRowCol
+        self == other
     }
 
     fn lt(&self, other: &Self) -> bool {
-        *self != Self::ReqRowCol || *other == Self::ReqRowCol
+        *self == Self::Any && *other != Self::Any
     }
 
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -396,8 +619,8 @@ impl PartialOrd for DispatchOptions {
         }
 
         match (self, other) {
-            (Self::ReqRowCol, _) => Some(Ordering::Greater),
-            (_, Self::ReqRowCol) => Some(Ordering::Less),
+            (Self::Any, _) => Some(Ordering::Less),
+            (_, Self::Any) => Some(Ordering::Greater),
             _ => None,
         }
     }
@@ -408,8 +631,6 @@ impl PartialOrd for DispatchOptions {
 pub enum GraphOp<B: GpuBackend + Clone = GpuContext> {
     Input,
     ConstF32(f32),
-    ConstI32(i32),
-    ConstU32(u32),
 
     Custom {
         lower: fn(
@@ -457,13 +678,15 @@ pub enum GraphOp<B: GpuBackend + Clone = GpuContext> {
         arity: u8,
         need_dims: bool,
         stable_iter: bool,
-        iter_space: Vec<bool>,
         auto_save: bool,
+        computes_gid: bool,
+        prefer_separate: bool,
         valid_dispatch: DispatchOptions,
     },
 }
 
 impl<B: GpuBackend + Clone> GraphOp<B> {
+    #[inline]
     #[must_use]
     pub const fn is_elementwise(&self) -> bool {
         if let Self::Custom { need_dims, .. } = self {
@@ -473,6 +696,7 @@ impl<B: GpuBackend + Clone> GraphOp<B> {
         }
     }
 
+    #[inline]
     #[must_use]
     pub const fn is_transform(&self) -> bool {
         if let Self::Custom { stable_iter, .. } = self {
@@ -482,17 +706,25 @@ impl<B: GpuBackend + Clone> GraphOp<B> {
         }
     }
 
+    #[inline]
     #[must_use]
     pub const fn is_leaf(&self) -> bool {
-        matches!(
-            self,
-            Self::Input
-                | Self::ConstF32(_)
-                | Self::ConstI32(_)
-                | Self::ConstU32(_)
-        )
+        matches!(self, Self::Input | Self::ConstF32(_))
     }
 
+    #[inline]
+    #[must_use]
+    pub const fn is_const(&self) -> bool {
+        matches!(self, Self::ConstF32(_))
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_input(&self) -> bool {
+        matches!(self, Self::Input)
+    }
+
+    #[inline]
     #[must_use]
     pub const fn is_auto_save(&self) -> bool {
         if let Self::Custom { auto_save, .. } = self {
@@ -502,6 +734,50 @@ impl<B: GpuBackend + Clone> GraphOp<B> {
         }
     }
 
+    #[inline]
+    #[must_use]
+    pub const fn is_compute_gid(&self) -> bool {
+        if let Self::Custom { computes_gid, .. } = self {
+            *computes_gid
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_prefer_separate(&self) -> bool {
+        if let Self::Custom {
+            prefer_separate, ..
+        } = self
+        {
+            *prefer_separate
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_need_dims(&self) -> bool {
+        if let Self::Custom { need_dims, .. } = self {
+            *need_dims
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn valid_dispatch(&self) -> DispatchOptions {
+        if let Self::Custom { valid_dispatch, .. } = self {
+            *valid_dispatch
+        } else {
+            DispatchOptions::Any
+        }
+    }
+
+    #[inline]
     #[must_use]
     pub const fn arity(&self) -> u8 {
         if let Self::Custom { arity, .. } = self {
@@ -623,15 +899,15 @@ fn check_shapes<B: GpuBackend + Clone>(
     errors: &mut Vec<Error<GraphErrorContext<B>>>,
 ) {
     for (node_id, node) in graph.nodes.iter().enumerate() {
-        if node.shape.len() < 2 {
+        if node.shape.len() < 2 && !node.op.is_leaf() {
             errors.push(Error {
-                msg: "no node can have less than two dimensions",
+                msg: "no compute node can have less than two dimensions",
                 kind: ErrorKind::ComputeGraphError,
                 ctx: GraphErrorContext::LowRank {
                     node: node_id,
                     rank: node.shape.len(),
                     required: 2,
-                }
+                },
             });
         }
 
@@ -640,10 +916,7 @@ fn check_shapes<B: GpuBackend + Clone>(
                 valid_shape(node_id, node, graph, errors);
             }
 
-            GraphOp::Input
-            | GraphOp::ConstF32(_)
-            | GraphOp::ConstI32(_)
-            | GraphOp::ConstU32(_) => {
+            GraphOp::Input | GraphOp::ConstF32(_) => {
                 if !node.inputs.is_empty() {
                     errors.push(Error {
                         msg: "leaf node accepting inputs",
@@ -882,11 +1155,9 @@ impl<B: GpuBackend + Clone> Graph<B> {
         self.add_node(GraphOp::ConstF32(data), Vec::new(), Vec::new())
     }
 
-    pub fn constant_i32(&mut self, data: i32) -> NodeId {
-        self.add_node(GraphOp::ConstI32(data), Vec::new(), Vec::new())
-    }
-
-    pub fn constant_u32(&mut self, data: u32) -> NodeId {
-        self.add_node(GraphOp::ConstU32(data), Vec::new(), Vec::new())
+    pub fn repeat<I>(&mut self, count: usize, mut start: I, structure: fn(&mut Self, I) -> I) {
+        for _ in 0..count {
+            start = structure(self, start);
+        }
     }
 }

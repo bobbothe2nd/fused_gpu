@@ -168,21 +168,21 @@ impl SaveIndicator {
 /// Intermediate representation of a GPU kernel.
 #[derive(Debug, Clone)]
 pub struct Kernel {
-    pub(crate) meta: Metadata,
+    pub meta: Metadata,
 
-    pub(crate) params: Vec<Param>,
+    pub params: Vec<Param>,
 
-    pub(crate) shared: Vec<SharedAlloc>,
+    pub shared: Vec<SharedAlloc>,
 
-    pub(crate) values: Vec<Value>,
+    pub values: Vec<Value>,
 
-    pub(crate) ops: Vec<Op>,
+    pub ops: Vec<Op>,
 
-    pub(crate) block: [u32; 3],
+    pub block: [u32; 3],
 
-    pub(crate) iter_space: Vec<MetaId>,
+    pub iter_space: Vec<MetaId>,
 
-    pub(crate) root: NodeId,
+    pub root: NodeId,
 }
 
 impl Kernel {
@@ -250,14 +250,61 @@ impl Kernel {
     }
 
     pub fn accum_var(&mut self, id: ValueId, op: Op) {
-        self.ops.push(Op::AccumVar {
+        self.ops.push(Op::AddAssign {
             id,
             val: Box::new(op),
         });
     }
 
-    pub fn update_state(&mut self, id: ValueId, state: ValueState) {
+    pub fn mul_assign_var(&mut self, id: ValueId, op: Op) {
+        self.ops.push(Op::MulAssign {
+            id,
+            val: Box::new(op),
+        });
+    }
+
+    pub fn div_assign_var(&mut self, id: ValueId, op: Op) {
+        self.ops.push(Op::DivAssign {
+            id,
+            val: Box::new(op),
+        });
+    }
+
+    pub fn sub_assign_var(&mut self, id: ValueId, op: Op) {
+        self.ops.push(Op::SubAssign {
+            id,
+            val: Box::new(op),
+        });
+    }
+
+    pub fn shl_assign_var(&mut self, id: ValueId, op: Op) {
+        self.ops.push(Op::ShlAssign {
+            id,
+            val: Box::new(op),
+        });
+    }
+
+    pub fn shr_assign_var(&mut self, id: ValueId, op: Op) {
+        self.ops.push(Op::ShrAssign {
+            id,
+            val: Box::new(op),
+        });
+    }
+
+    pub fn update_var_state(&mut self, id: ValueId, state: ValueState) {
         self.values[id].state = state;
+    }
+
+    pub fn update_var_dtype(&mut self, id: ValueId, dtype: DType) {
+        self.values[id].dtype = dtype;
+    }
+
+    pub fn update_var_init(&mut self, id: ValueId, init: Op) {
+        self.values[id].init = Some(init);
+    }
+
+    pub fn update_param_dtype(&mut self, id: ValueId, dtype: DType) {
+        self.params[id].dtype = dtype;
     }
 
     pub fn new_shared(&mut self, dtype: DType, size: u32) -> SharedId {
@@ -307,6 +354,22 @@ impl Kernel {
         ret
     }
 
+    pub fn push_while_loop<F: FnOnce(&mut Self) -> R, R>(&mut self, cond: Op, content: F) -> R {
+        self.ops.push(Op::WhileLoopBegin {
+            cond: Box::new(cond),
+        });
+        let ret = content(self);
+        self.ops.push(Op::EndScope);
+        ret
+    }
+
+    pub fn push_forever_loop<F: FnOnce(&mut Self) -> R, R>(&mut self, content: F) -> R {
+        self.ops.push(Op::ForeverLoopBegin);
+        let ret = content(self);
+        self.ops.push(Op::EndScope);
+        ret
+    }
+
     pub fn push_continue(&mut self) {
         self.ops.push(Op::Continue);
     }
@@ -316,7 +379,55 @@ impl Kernel {
     }
 
     pub fn param_store(&mut self, param: ParamId, index: ValueId, value: ValueId) {
-        self.ops.push(Op::Store {
+        self.ops.push(Op::ParamStore {
+            param,
+            index,
+            value,
+        });
+    }
+
+    pub fn param_accum(&mut self, param: ParamId, index: ValueId, value: ValueId) {
+        self.ops.push(Op::ParamAccum {
+            param,
+            index,
+            value,
+        });
+    }
+
+    pub fn param_mul(&mut self, param: ParamId, index: ValueId, value: ValueId) {
+        self.ops.push(Op::ParamMul {
+            param,
+            index,
+            value,
+        });
+    }
+
+    pub fn param_div(&mut self, param: ParamId, index: ValueId, value: ValueId) {
+        self.ops.push(Op::ParamDiv {
+            param,
+            index,
+            value,
+        });
+    }
+
+    pub fn param_sub(&mut self, param: ParamId, index: ValueId, value: ValueId) {
+        self.ops.push(Op::ParamSub {
+            param,
+            index,
+            value,
+        });
+    }
+
+    pub fn param_shl(&mut self, param: ParamId, index: ValueId, value: ValueId) {
+        self.ops.push(Op::ParamShl {
+            param,
+            index,
+            value,
+        });
+    }
+
+    pub fn param_shr(&mut self, param: ParamId, index: ValueId, value: ValueId) {
+        self.ops.push(Op::ParamShr {
             param,
             index,
             value,
@@ -325,6 +436,30 @@ impl Kernel {
 
     pub fn shared_store(&mut self, mem: SharedId, index: ValueId, value: ValueId) {
         self.ops.push(Op::SharedStore { mem, index, value });
+    }
+
+    pub fn shared_accum(&mut self, mem: SharedId, index: ValueId, value: ValueId) {
+        self.ops.push(Op::SharedAccum { mem, index, value });
+    }
+
+    pub fn shared_mul(&mut self, mem: SharedId, index: ValueId, value: ValueId) {
+        self.ops.push(Op::SharedMul { mem, index, value });
+    }
+
+    pub fn shared_div(&mut self, mem: SharedId, index: ValueId, value: ValueId) {
+        self.ops.push(Op::SharedDiv { mem, index, value });
+    }
+
+    pub fn shared_sub(&mut self, mem: SharedId, index: ValueId, value: ValueId) {
+        self.ops.push(Op::SharedSub { mem, index, value });
+    }
+
+    pub fn shared_shl(&mut self, mem: SharedId, index: ValueId, value: ValueId) {
+        self.ops.push(Op::SharedShl { mem, index, value });
+    }
+
+    pub fn shared_shr(&mut self, mem: SharedId, index: ValueId, value: ValueId) {
+        self.ops.push(Op::SharedShr { mem, index, value });
     }
 }
 
