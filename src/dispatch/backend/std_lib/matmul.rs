@@ -1,13 +1,9 @@
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend,
-        backend::{
-            Axis, DType, DispatchOptions, Graph, GraphOp, Node, NodeId, Op, ParamId, ValueId,
-            ValueState,
-            kernel::{Kernel, NodeInput, SaveIndicator},
+        CompilationOptions, GpuBackend, backend::{
+            Axis, DType, DispatchOptions, Graph, GraphOp, Node, NodeId, Op, ParamId, ValueId, ValueState, kernel::{LinkedKernel, NodeInput, SaveIndicator},
         },
-    },
-    errors::{Error, ErrorKind, GraphErrorContext},
+    }, errors::{Error, ErrorKind, GraphErrorContext},
 };
 use alloc::{format, vec, vec::Vec};
 
@@ -21,7 +17,7 @@ pub fn lower_matmul_recursive<B: GpuBackend + Clone>(
         &Graph<B>,
         &[Option<ParamId>],
         &[Option<ParamId>],
-        &mut Kernel,
+        &mut LinkedKernel,
         ValueId,
         ValueId,
         ValueId,
@@ -40,7 +36,7 @@ pub fn lower_matmul_recursive<B: GpuBackend + Clone>(
     out: ValueId,
     node_params: &[Option<ParamId>],
     saved_params: &[Option<ParamId>],
-    kernel: &mut Kernel,
+    kernel: &mut LinkedKernel,
     base: ValueId,
     _idx: ValueId,
     local_row: ValueId,
@@ -50,12 +46,12 @@ pub fn lower_matmul_recursive<B: GpuBackend + Clone>(
     _stable_iteration_space: bool,
     options: &CompilationOptions<B>,
 ) -> Result<Vec<NodeId>, Error> {
-    let row = kernel.def_var(
+    let row = kernel.raw.def_var(
         DType::UnsignedInt,
         ValueState::Immut,
         Some(Op::GlobalId { axis: Axis::Y }),
     );
-    let col = kernel.def_var(
+    let col = kernel.raw.def_var(
         DType::UnsignedInt,
         ValueState::Immut,
         Some(Op::GlobalId { axis: Axis::X }),
@@ -113,7 +109,7 @@ pub fn lower_matmul_recursive<B: GpuBackend + Clone>(
         b_node_shape.swap(len - 1, len - 2);
     }
 
-    let m = kernel.def_var(
+    let m = kernel.raw.def_var(
         DType::UnsignedInt,
         ValueState::Immut,
         Some(Op::ReadMeta {
@@ -121,7 +117,7 @@ pub fn lower_matmul_recursive<B: GpuBackend + Clone>(
             field: a_node_shape[a_node_shape.len() - 2],
         }),
     );
-    let n = kernel.def_var(
+    let n = kernel.raw.def_var(
         DType::UnsignedInt,
         ValueState::Immut,
         Some(Op::ReadMeta {
@@ -129,7 +125,7 @@ pub fn lower_matmul_recursive<B: GpuBackend + Clone>(
             field: b_node_shape[b_node_shape.len() - 1],
         }),
     );
-    let k = kernel.def_var(
+    let k = kernel.raw.def_var(
         DType::UnsignedInt,
         ValueState::Immut,
         Some(Op::ReadMeta {
@@ -139,7 +135,7 @@ pub fn lower_matmul_recursive<B: GpuBackend + Clone>(
     );
 
     if backwardness.is_none() {
-        kernel.overwrite_var(out, Op::ConstF32 { value: 0.0 });
+        kernel.raw.overwrite_var(out, Op::ConstF32 { value: 0.0 });
     }
 
     forward_matmul(
@@ -180,7 +176,7 @@ pub fn forward_matmul<B: GpuBackend + Clone>(
         &Graph<B>,
         &[Option<ParamId>],
         &[Option<ParamId>],
-        &mut Kernel,
+        &mut LinkedKernel,
         ValueId,
         ValueId,
         ValueId,
@@ -204,7 +200,7 @@ pub fn forward_matmul<B: GpuBackend + Clone>(
     out: ValueId,
     node_params: &[Option<ParamId>],
     saved_params: &[Option<ParamId>],
-    kernel: &mut Kernel,
+    kernel: &mut LinkedKernel,
     base: ValueId,
     row: ValueId,
     col: ValueId,
@@ -216,22 +212,22 @@ pub fn forward_matmul<B: GpuBackend + Clone>(
 ) -> Result<Vec<NodeId>, Error> {
     let mut deepest = Vec::new();
 
-    let a_tile = kernel.new_shared(DType::Float, shared_size);
-    let b_tile = kernel.new_shared(DType::Float, shared_size);
+    let a_tile = kernel.raw.new_shared(DType::Float, shared_size);
+    let b_tile = kernel.raw.new_shared(DType::Float, shared_size);
 
-    let one = kernel.def_var(
+    let one = kernel.raw.def_var(
         DType::UnsignedInt,
         ValueState::Inline,
         Some(Op::ConstU32 { value: 1 }),
     );
 
-    let tk = kernel.def_var(
+    let tk = kernel.raw.def_var(
         DType::UnsignedInt,
         ValueState::Mut,
         Some(Op::ConstU32 { value: 0 }),
     );
 
-    let tile_row = kernel.def_var(
+    let tile_row = kernel.raw.def_var(
         DType::UnsignedInt,
         ValueState::Inline,
         Some(Op::Mul {
@@ -239,7 +235,7 @@ pub fn forward_matmul<B: GpuBackend + Clone>(
             b: tile_size,
         }),
     );
-    let shared_idx = kernel.def_var(
+    let shared_idx = kernel.raw.def_var(
         DType::UnsignedInt,
         ValueState::Mut,
         Some(Op::Add {
@@ -252,7 +248,7 @@ pub fn forward_matmul<B: GpuBackend + Clone>(
     let mut b_deepest = Vec::new();
 
     kernel.push_for_loop(tk, k, tile_size, |kernel| {
-        let a_k = kernel.def_var(
+        let a_k = kernel.raw.def_var(
             DType::UnsignedInt,
             ValueState::Immut,
             Some(Op::Add {
@@ -261,7 +257,7 @@ pub fn forward_matmul<B: GpuBackend + Clone>(
             }),
         );
 
-        let b_k = kernel.def_var(
+        let b_k = kernel.raw.def_var(
             DType::UnsignedInt,
             ValueState::Immut,
             Some(Op::Add {
@@ -271,40 +267,40 @@ pub fn forward_matmul<B: GpuBackend + Clone>(
         );
 
         let a_idx = if swap_a {
-            let a_row = kernel.def_var(
+            let a_row = kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Inline,
                 Some(Op::Mul { a: a_k, b: m }),
             );
-            let a_col = kernel.def_var(
+            let a_col = kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Inline,
                 Some(Op::Add { a: a_row, b: row }),
             );
-            kernel.def_var(
+            kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Immut,
                 Some(Op::Add { a: a_col, b: base }),
             )
         } else {
-            let a_row = kernel.def_var(
+            let a_row = kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Inline,
                 Some(Op::Mul { a: row, b: k }),
             );
-            let a_col = kernel.def_var(
+            let a_col = kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Inline,
                 Some(Op::Add { a: a_row, b: a_k }),
             );
-            kernel.def_var(
+            kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Immut,
                 Some(Op::Add { a: a_col, b: base }),
             )
         };
 
-        let a_val = kernel.def_var(
+        let a_val = kernel.raw.def_var(
             DType::Float,
             ValueState::Mut,
             Some(Op::ConstF32 { value: 0.0 }),
@@ -330,43 +326,43 @@ pub fn forward_matmul<B: GpuBackend + Clone>(
             options,
         )?;
 
-        kernel.shared_store(a_tile, shared_idx, a_val);
+        kernel.raw.shared_store(a_tile, shared_idx, a_val);
 
         let b_idx = if swap_b {
-            let b_row = kernel.def_var(
+            let b_row = kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Inline,
                 Some(Op::Mul { a: col, b: k }),
             );
-            let b_col = kernel.def_var(
+            let b_col = kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Inline,
                 Some(Op::Add { a: b_row, b: b_k }),
             );
-            kernel.def_var(
+            kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Immut,
                 Some(Op::Add { a: b_col, b: base }),
             )
         } else {
-            let b_row = kernel.def_var(
+            let b_row = kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Inline,
                 Some(Op::Mul { a: b_k, b: n }),
             );
-            let b_col = kernel.def_var(
+            let b_col = kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Inline,
                 Some(Op::Add { a: b_row, b: col }),
             );
-            kernel.def_var(
+            kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Immut,
                 Some(Op::Add { a: b_col, b: base }),
             )
         };
 
-        let b_val = kernel.def_var(
+        let b_val = kernel.raw.def_var(
             DType::Float,
             ValueState::Mut,
             Some(Op::ConstF32 { value: 0.0 }),
@@ -392,18 +388,18 @@ pub fn forward_matmul<B: GpuBackend + Clone>(
             options,
         )?;
 
-        kernel.shared_store(b_tile, shared_idx, b_val);
+        kernel.raw.shared_store(b_tile, shared_idx, b_val);
 
-        kernel.push_barrier();
+        kernel.raw.push_barrier();
 
-        let inner = kernel.def_var(
+        let inner = kernel.raw.def_var(
             DType::UnsignedInt,
             ValueState::Mut,
             Some(Op::ConstU32 { value: 0 }),
         );
 
         kernel.push_for_loop(inner, tile_size, one, |kernel| {
-            let a_s_row = kernel.def_var(
+            let a_s_row = kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Inline,
                 Some(Op::Mul {
@@ -411,7 +407,7 @@ pub fn forward_matmul<B: GpuBackend + Clone>(
                     b: tile_size,
                 }),
             );
-            let a_s_idx = kernel.def_var(
+            let a_s_idx = kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Immut,
                 Some(Op::Add {
@@ -420,7 +416,7 @@ pub fn forward_matmul<B: GpuBackend + Clone>(
                 }),
             );
 
-            let a_val = kernel.def_var(
+            let a_val = kernel.raw.def_var(
                 DType::Float,
                 ValueState::Immut,
                 Some(Op::SharedLoad {
@@ -429,7 +425,7 @@ pub fn forward_matmul<B: GpuBackend + Clone>(
                 }),
             );
 
-            let b_s_row = kernel.def_var(
+            let b_s_row = kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Inline,
                 Some(Op::Mul {
@@ -437,7 +433,7 @@ pub fn forward_matmul<B: GpuBackend + Clone>(
                     b: tile_size,
                 }),
             );
-            let b_s_idx = kernel.def_var(
+            let b_s_idx = kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Immut,
                 Some(Op::Add {
@@ -446,7 +442,7 @@ pub fn forward_matmul<B: GpuBackend + Clone>(
                 }),
             );
 
-            let b_val = kernel.def_var(
+            let b_val = kernel.raw.def_var(
                 DType::Float,
                 ValueState::Immut,
                 Some(Op::SharedLoad {
@@ -455,7 +451,7 @@ pub fn forward_matmul<B: GpuBackend + Clone>(
                 }),
             );
 
-            kernel.overwrite_var(
+            kernel.raw.overwrite_var(
                 out,
                 Op::Fma {
                     a: a_val,
@@ -467,7 +463,7 @@ pub fn forward_matmul<B: GpuBackend + Clone>(
             Ok(())
         })?;
 
-        kernel.push_barrier();
+        kernel.raw.push_barrier();
 
         Ok(())
     })?;

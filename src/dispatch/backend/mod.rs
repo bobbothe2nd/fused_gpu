@@ -3,11 +3,8 @@ use core::{cmp::Ordering, fmt::Debug};
 
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend, GpuBufferBackend, GpuKernelBackend,
-        TargetCompilationOptions,
-        backend::kernel::{Kernel, KernelGroup, NodeInput, SaveIndicator},
-    },
-    errors::{Error, ErrorKind, GraphErrorContext},
+        CompilationOptions, GpuBackend, GpuBufferBackend, GpuKernelBackend, TargetCompilationOptions, backend::kernel::{Kernel, KernelGroup, KernelsChained, LinkedKernel, NodeInput, RawKernel, SaveIndicator},
+    }, errors::{Error, ErrorKind, GraphErrorContext},
 };
 
 #[cfg(feature = "standard_ops")]
@@ -72,6 +69,8 @@ impl GpuBackend for NopGpuContext {
     type Kernel = NopGpuKernel;
     type ParamLayout = ();
     type SubmissionIndex = ();
+    type Schedule<'a> = ();
+    type SyncSubmissions = ();
 
     const TARGET_SPEC: TargetCompilationOptions<Self> =
         TargetCompilationOptions::new(false, false, false);
@@ -90,8 +89,8 @@ impl GpuBackend for NopGpuContext {
 
     fn compile(
         &self,
-        _src: &Kernel,
-        _params: &Self::ParamLayout,
+        _src: &RawKernel,
+        _params: &[Param],
         _options: &CompilationOptions<Self>,
     ) -> Result<Self::Kernel, Error> {
         Err(Error {
@@ -109,31 +108,32 @@ impl GpuBackend for NopGpuContext {
         })
     }
 
-    fn init_params(
-        &self,
-        _src: &[Param],
-        _options: &CompilationOptions<Self>,
-    ) -> Result<Self::ParamLayout, Error> {
-        Err(Error {
-            msg: "using nop backend",
-            kind: ErrorKind::UnsupportedFeature,
-            ctx: (),
-        })
-    }
-
-    fn launch(
+    fn launch_kernel(
         &self,
         _kernel: &Self::Kernel,
         _wg: [u32; 3],
         _bindings: &[&Self::Buffer],
-    ) -> Self::SubmissionIndex {
-    }
+    ) -> Self::SyncSubmissions {}
+
+    fn launch_schedule(
+        &self,
+        _schedule: &Self::Schedule<'_>,
+    ) {}
+
+    fn schedule<'a>(
+        &self,
+        _kernels: &'a [(kernel::Dependencies<Self::Kernel>, NodeId, &[bool])],
+        _bindings: &[&'a Self::Buffer],
+        _meta: &[u32],
+    ) -> Self::Schedule<'a> {}
 
     fn poll(&self) -> super::PollStatus {
         super::PollStatus::Failed
     }
 
     fn sync(&self, _submission_index: Self::SubmissionIndex) {}
+
+    fn submit(&self, _submission: Self::SyncSubmissions) -> Self::SubmissionIndex {}
 
     fn upload(&self, _buffer: &Self::Buffer, _data: &[u8]) -> Result<Self::SubmissionIndex, Error> {
         Err(Error {
@@ -174,6 +174,7 @@ pub enum DType {
 pub struct Param {
     pub dtype: DType,
     pub ty: ParamTy,
+    pub pid: ParamId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -643,7 +644,7 @@ pub enum GraphOp<B: GpuBackend + Clone = GpuContext> {
                 &Graph<B>,
                 &[Option<ParamId>],
                 &[Option<ParamId>],
-                &mut Kernel,
+                &mut LinkedKernel,
                 ValueId,
                 ValueId,
                 ValueId,
@@ -662,7 +663,7 @@ pub enum GraphOp<B: GpuBackend + Clone = GpuContext> {
             ValueId,
             &[Option<ParamId>],
             &[Option<ParamId>],
-            &mut Kernel,
+            &mut LinkedKernel,
             ValueId,
             ValueId,
             ValueId,
@@ -1126,7 +1127,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
         options: &CompilationOptions<B>,
         saved: &[SaveIndicator],
     ) -> Result<KernelGroup, Error> {
-        Kernel::lower(self, meta, saved, options)
+        KernelsChained::lower(self, meta, saved, options)
     }
 
     fn add_node(&mut self, op: GraphOp<B>, inputs: Vec<NodeId>, shape: Vec<MetaId>) -> NodeId {

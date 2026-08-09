@@ -1,26 +1,13 @@
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend, GpuBufferBackend, GpuKernelBackend, PollStatus,
-        TargetCompilationOptions,
-        backend::{Axis, DType, MetaId, Op, Param, ParamTy, ValueId, ValueState, kernel::Kernel},
-    },
-    errors::{Error, ErrorKind},
+        CompilationOptions, GpuBackend, GpuBufferBackend, GpuKernelBackend, PollStatus, TargetCompilationOptions, backend::{Axis, DType, MetaId, NodeId, Op, Param, ParamTy, ValueId, ValueState, kernel::{Dependencies, RawKernel}},
+    }, errors::{Error, ErrorKind}, tensor::{build_dims, calc_grid},
 };
 use alloc::{string::String, vec::Vec};
 use briny::raw::cast_slice;
-use core::fmt::Write;
+use core::{fmt::Write, num::NonZeroU64};
 use wgpu::{
-    BackendOptions, Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType, BufferDescriptor, BufferUsages,
-    CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor,
-    Device, DeviceDescriptor, Dx12BackendOptions, Dx12Compiler, Dx12SwapchainKind,
-    Dx12UseFrameLatencyWaitableObject, ExperimentalFeatures, Features, ForceShaderModelToken,
-    GlBackendOptions, GlDebugFns, GlFenceBehavior, Gles3MinorVersion, Instance, InstanceDescriptor,
-    InstanceFlags, Limits, MemoryBudgetThresholds, MemoryHints, NoopBackendOptions,
-    PipelineCompilationOptions, PipelineLayout, PipelineLayoutDescriptor, PollType,
-    PowerPreference, Queue, RequestAdapterError, RequestAdapterOptions, ShaderModuleDescriptor,
-    ShaderSource, ShaderStages, SubmissionIndex, Trace,
-    util::{BufferInitDescriptor, DeviceExt},
+    BackendOptions, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, CommandBuffer, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Device, DeviceDescriptor, Dx12BackendOptions, Dx12Compiler, Dx12SwapchainKind, Dx12UseFrameLatencyWaitableObject, ExperimentalFeatures, Features, ForceShaderModelToken, GlBackendOptions, GlDebugFns, GlFenceBehavior, Gles3MinorVersion, Instance, InstanceDescriptor, InstanceFlags, Limits, MemoryBudgetThresholds, MemoryHints, NoopBackendOptions, PipelineCompilationOptions, PipelineLayout, PipelineLayoutDescriptor, PollType, PowerPreference, Queue, RequestAdapterError, RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource, ShaderStages, SubmissionIndex, Trace, util::{BufferInitDescriptor, DeviceExt},
 };
 
 /// WGPU context for device and queue.
@@ -128,6 +115,10 @@ impl GpuKernelBackend for GpuKernel {
     }
 }
 
+pub struct Schedule<'a> {
+    kernels: Vec<Vec<(&'a ComputePipeline, [u32; 3], BindGroup)>>,
+}
+
 impl GpuBackend for GpuContext {
     const TARGET_SPEC: TargetCompilationOptions<Self> =
         TargetCompilationOptions::new(false, false, false);
@@ -136,6 +127,8 @@ impl GpuBackend for GpuContext {
     type Kernel = GpuKernel;
     type SubmissionIndex = SubmissionIndex;
     type ParamLayout = PipelineLayout;
+    type Schedule<'a> = Schedule<'a>;
+    type SyncSubmissions = CommandBuffer;
 
     #[inline]
     fn alloc(&self, len: usize) -> Self::Buffer {
@@ -245,12 +238,13 @@ impl GpuBackend for GpuContext {
     }
 
     #[inline]
-    fn init_params(
+    fn compile(
         &self,
-        src: &[Param],
-        _options: &CompilationOptions<Self>,
-    ) -> Result<Self::ParamLayout, Error> {
-        let entries = generate_layout_desc(src);
+        src: &RawKernel,
+        params: &[Param],
+        options: &CompilationOptions<Self>,
+    ) -> Result<Self::Kernel, Error> {
+        let entries = generate_layout_desc(params);
         let desc = BindGroupLayoutDescriptor {
             label: Some("bind_group_layout"),
             entries: &entries,
@@ -266,17 +260,7 @@ impl GpuBackend for GpuContext {
         };
         let pipeline_layout = self.device.create_pipeline_layout(&desc);
 
-        Ok(pipeline_layout)
-    }
-
-    #[inline]
-    fn compile(
-        &self,
-        src: &Kernel,
-        pipeline_layout: &Self::ParamLayout,
-        options: &CompilationOptions<Self>,
-    ) -> Result<Self::Kernel, Error> {
-        let source = generate_wgsl(src, options.debug.pretty_print_ir);
+        let source = generate_wgsl(src, params, options.debug.pretty_print_ir);
 
         let shader = self.device.create_shader_module(ShaderModuleDescriptor {
             label: Some("shader"),
@@ -288,7 +272,7 @@ impl GpuBackend for GpuContext {
                 .device
                 .create_compute_pipeline(&ComputePipelineDescriptor {
                     label: Some("pipeline"),
-                    layout: Some(pipeline_layout),
+                    layout: Some(&pipeline_layout),
                     module: &shader,
                     entry_point: Some("main"),
                     compilation_options: PipelineCompilationOptions::default(),
@@ -299,13 +283,103 @@ impl GpuBackend for GpuContext {
         })
     }
 
+    fn schedule<'a>(
+        &self,
+        kernels: &'a [(Dependencies<Self::Kernel>, NodeId, &[bool])],
+        bindings: &[&'a Self::Buffer],
+        meta: &[u32],
+    ) -> Self::Schedule<'a> {
+        let mut resolved = Vec::new();
+        let mut tmp_res = Vec::new();
+
+        let mut scheduled_kernels = Vec::new();
+
+        while resolved.len() < kernels.len() {
+            let mut kernels_inner = Vec::new();
+
+            for (kernel, idx, params) in kernels {
+                if resolved.contains(idx) {
+                    continue;
+                }
+
+                if kernel.dep.iter().all(|x| resolved.contains(x)) {
+                    tmp_res.push(*idx);
+
+                    let iter_space = build_dims(kernel.val.iteration_space(), meta);
+                    let grid = calc_grid(&iter_space, *kernel.val.block());
+
+                    let kernel_bindings = bindings
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, buf)| if params[i] {
+                            let entry = BindGroupEntry {
+                                binding: i as u32,
+                                resource: buf.0.as_entire_binding(),
+                            };
+
+                            Some(entry)
+                        } else {
+                            None
+                        })
+                        .collect::<Vec<_>>();
+
+                    let kernel = &kernel.val.kernel;
+
+                    let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+                        layout: &kernel.get_bind_group_layout(0),
+                        entries: &kernel_bindings,
+                        label: Some("bind_group"),
+                    });
+
+                    kernels_inner.push((kernel, grid, bind_group));
+                }
+            }
+
+            scheduled_kernels.push(kernels_inner);
+            resolved.append(&mut tmp_res);
+        }
+
+        Schedule {
+            kernels: scheduled_kernels,
+        }
+    }
+
+    fn launch_schedule(
+        &self,
+        schedule: &Self::Schedule<'_>,
+    ) {
+        for parallel in &schedule.kernels {
+            for (kernel, wg, bind_group) in parallel {
+                let mut encoder = self
+                    .device
+                    .create_command_encoder(&CommandEncoderDescriptor {
+                        label: Some("encoder"),
+                    });
+
+                {
+                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("pass"),
+                        timestamp_writes: None,
+                    });
+
+                    pass.set_pipeline(kernel);
+                    pass.set_bind_group(0, bind_group, &[]);
+
+                    pass.dispatch_workgroups(wg[0], wg[1], wg[2]);
+                }
+
+                self.queue.submit([encoder.finish()]);
+            }
+        }
+    }
+
     #[inline]
-    fn launch(
+    fn launch_kernel(
         &self,
         kernel: &Self::Kernel,
         wg: [u32; 3],
         bindings: &[&Self::Buffer],
-    ) -> Self::SubmissionIndex {
+    ) -> Self::SyncSubmissions {
         let mut encoder = self
             .device
             .create_command_encoder(&CommandEncoderDescriptor {
@@ -338,14 +412,10 @@ impl GpuBackend for GpuContext {
             pass.set_pipeline(kernel);
             pass.set_bind_group(0, &bind_group, &[]);
 
-            let dispatch_x = wg[0];
-            let dispatch_y = wg[1];
-            let dispatch_z = wg[2];
-
-            pass.dispatch_workgroups(dispatch_x, dispatch_y, dispatch_z);
+            pass.dispatch_workgroups(wg[0], wg[1], wg[2]);
         }
 
-        self.queue.submit([encoder.finish()])
+        encoder.finish()
     }
 
     #[inline]
@@ -354,6 +424,10 @@ impl GpuBackend for GpuContext {
             submission_index: Some(submission_index),
             timeout: None,
         });
+    }
+
+    fn submit(&self, submission: Self::SyncSubmissions) -> Self::SubmissionIndex {
+        self.queue.submit([submission])
     }
 
     #[inline]
@@ -386,10 +460,11 @@ impl GpuBufferBackend for GpuBuffer {
 
 #[inline]
 fn generate_layout_desc(params: &[Param]) -> Vec<BindGroupLayoutEntry> {
+    const MIN_BIND_SIZE: NonZeroU64 = NonZeroU64::new(1024).unwrap();
+
     params
         .iter()
-        .enumerate()
-        .map(|(i, x)| {
+        .map(|x| {
             let ty = match x.ty {
                 ParamTy::Uniform => BufferBindingType::Uniform,
                 ParamTy::ReadOnly => BufferBindingType::Storage { read_only: true },
@@ -397,12 +472,15 @@ fn generate_layout_desc(params: &[Param]) -> Vec<BindGroupLayoutEntry> {
             };
 
             BindGroupLayoutEntry {
-                binding: i as u32,
+                binding: x.pid as u32,
                 visibility: ShaderStages::COMPUTE,
                 ty: BindingType::Buffer {
                     ty,
                     has_dynamic_offset: false,
-                    min_binding_size: None,
+                    min_binding_size: match ty {
+                        BufferBindingType::Uniform => None,
+                        _ => Some(MIN_BIND_SIZE),
+                    },
                 },
                 count: None,
             }
@@ -411,10 +489,10 @@ fn generate_layout_desc(params: &[Param]) -> Vec<BindGroupLayoutEntry> {
 }
 
 #[inline]
-fn generate_wgsl(kernel: &Kernel, pretty_print: bool) -> String {
+fn generate_wgsl(kernel: &RawKernel, params: &[Param], pretty_print: bool) -> String {
     let mut out = String::new();
 
-    emit_bindings(kernel, &mut out, pretty_print);
+    emit_bindings(kernel, params, &mut out, pretty_print);
     newline(pretty_print, &mut out, 0);
 
     emit_entry(kernel, &mut out, pretty_print);
@@ -458,7 +536,7 @@ fn tab(pretty_print: bool, out: &mut String) {
 }
 
 #[inline]
-fn emit_bindings(kernel: &Kernel, out: &mut String, pretty_print: bool) {
+fn emit_bindings(kernel: &RawKernel, params: &[Param], out: &mut String, pretty_print: bool) {
     let _ = write!(out, "struct Meta {{");
     for f in 0..kernel.meta.fields {
         newline(pretty_print, out, 1);
@@ -469,7 +547,7 @@ fn emit_bindings(kernel: &Kernel, out: &mut String, pretty_print: bool) {
 
     newline(pretty_print, out, 0);
 
-    for (i, p) in kernel.params.iter().enumerate() {
+    for p in params {
         let var_type = match p.ty {
             ParamTy::ReadOnly => "var<storage, read>",
             ParamTy::ReadWrite => "var<storage, read_write>",
@@ -477,13 +555,16 @@ fn emit_bindings(kernel: &Kernel, out: &mut String, pretty_print: bool) {
         };
 
         newline(pretty_print, out, 0);
+
+        let pid = p.pid;
+
         if p.ty == ParamTy::Uniform && p.dtype == DType::UnsignedInt {
-            let _ = write!(out, "@group(0) @binding({i}) {var_type} param{i}: Meta;");
+            let _ = write!(out, "@group(0) @binding({pid}) {var_type} param{pid}: Meta;");
         } else {
             let _ = write!(
                 out,
-                "@group(0) @binding({i}) {var_type} param{i}: array<{}>;",
-                get_dtype(p.dtype)
+                "@group(0) @binding({pid}) {var_type} param{pid}: array<{}>;",
+                get_dtype(p.dtype),
             );
         }
     }
@@ -502,7 +583,7 @@ fn emit_bindings(kernel: &Kernel, out: &mut String, pretty_print: bool) {
 }
 
 #[inline]
-fn emit_entry(kernel: &Kernel, out: &mut String, pretty_print: bool) {
+fn emit_entry(kernel: &RawKernel, out: &mut String, pretty_print: bool) {
     newline(pretty_print, out, 0);
     let _ = write!(
         out,
@@ -532,7 +613,7 @@ fn emit_entry(kernel: &Kernel, out: &mut String, pretty_print: bool) {
 }
 
 #[inline]
-fn emit_ops(kernel: &Kernel, out: &mut String, pretty_print: bool) {
+fn emit_ops(kernel: &RawKernel, out: &mut String, pretty_print: bool) {
     let mut nesting = 0;
 
     for op in &kernel.ops {
@@ -555,7 +636,7 @@ fn emit_ops(kernel: &Kernel, out: &mut String, pretty_print: bool) {
     }
 }
 
-fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &Kernel) {
+fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &RawKernel) {
     match op {
         Op::DefineVar { id } => {
             let val = &kernel.values[*id];
@@ -1067,7 +1148,7 @@ fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &Kernel) {
     }
 }
 
-fn render_val(id: ValueId, kernel: &Kernel) -> String {
+fn render_val(id: ValueId, kernel: &RawKernel) -> String {
     let mut out = String::new();
     let val = &kernel.values[id];
     match val.state {

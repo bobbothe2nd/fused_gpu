@@ -2,8 +2,8 @@ use crate::{
     dispatch::{
         GpuBackend,
         backend::{
-            CompilationOptions, DType, DispatchOptions, Graph, GraphOp, Kernel, MetaId, Node,
-            NodeId, NodeInput, Op, ParamId, ValueId, ValueState, kernel::SaveIndicator,
+            CompilationOptions, DType, DispatchOptions, Graph, GraphOp, MetaId, Node,
+            NodeId, NodeInput, Op, ParamId, ValueId, ValueState, kernel::{SaveIndicator, LinkedKernel},
         },
     },
     errors::{Error, ErrorKind, GraphErrorContext},
@@ -89,7 +89,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                     &Self,
                     &[Option<ParamId>],
                     &[Option<ParamId>],
-                    &mut Kernel,
+                    &mut LinkedKernel,
                     ValueId,
                     ValueId,
                     ValueId,
@@ -108,7 +108,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                         out: ValueId,
                         node_params: &[Option<ParamId>],
                         saved_params: &[Option<ParamId>],
-                        kernel: &mut Kernel,
+                        kernel: &mut LinkedKernel,
                         base: ValueId,
                         idx: ValueId,
                         local_row: ValueId,
@@ -124,7 +124,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             let a = graph.nodes[node_id].inputs[0];
                             let b = graph.nodes[node_id].inputs[1];
 
-                            let a_val = kernel.def_var(DType::Float, ValueState::Mut, None);
+                            let a_val = kernel.raw.def_var(DType::Float, ValueState::Mut, None);
 
                             let mut a_deep = eval_node(
                                 root,
@@ -146,7 +146,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                                 options,
                             )?;
 
-                            let b_val = kernel.def_var(DType::Float, ValueState::Mut, None);
+                            let b_val = kernel.raw.def_var(DType::Float, ValueState::Mut, None);
 
                             let mut b_deep = eval_node(
                                 root,
@@ -171,7 +171,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             deepest.append(&mut a_deep);
                             deepest.append(&mut b_deep);
 
-                            kernel.overwrite_var(out, Op::Add { a: a_val, b: b_val });
+                            kernel.raw.overwrite_var(out, Op::Add { a: a_val, b: b_val });
                         }
 
                         Some(0 | 1) => {
@@ -237,7 +237,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                     &Self,
                     &[Option<ParamId>],
                     &[Option<ParamId>],
-                    &mut Kernel,
+                    &mut LinkedKernel,
                     ValueId,
                     ValueId,
                     ValueId,
@@ -256,7 +256,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                         out: ValueId,
                         node_params: &[Option<ParamId>],
                         saved_params: &[Option<ParamId>],
-                        kernel: &mut Kernel,
+                        kernel: &mut LinkedKernel,
                         base: ValueId,
                         idx: ValueId,
                         local_row: ValueId,
@@ -272,7 +272,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             let a = graph.nodes[node_id].inputs[0];
                             let b = graph.nodes[node_id].inputs[1];
 
-                            let a_val = kernel.def_var(DType::Float, ValueState::Mut, None);
+                            let a_val = kernel.raw.def_var(DType::Float, ValueState::Mut, None);
 
                             let mut a_deep = eval_node(
                                 root,
@@ -294,7 +294,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                                 options,
                             )?;
 
-                            let b_val = kernel.def_var(DType::Float, ValueState::Mut, None);
+                            let b_val = kernel.raw.def_var(DType::Float, ValueState::Mut, None);
 
                             let mut b_deep = eval_node(
                                 root,
@@ -319,11 +319,11 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             deepest.append(&mut a_deep);
                             deepest.append(&mut b_deep);
 
-                            kernel.overwrite_var(out, Op::Mul { a: a_val, b: b_val });
+                            kernel.raw.overwrite_var(out, Op::Mul { a: a_val, b: b_val });
                         }
 
                         Some(0) => {
-                            let g_val = kernel.def_var(
+                            let g_val = kernel.raw.def_var(
                                 DType::Float,
                                 ValueState::Mut,
                                 Some(Op::ConstF32 { value: 0.0 }),
@@ -353,13 +353,13 @@ impl<B: GpuBackend + Clone> Graph<B> {
 
                             let saved = read_saved(kernel, idx, saved_params[user]);
 
-                            kernel.accum_var(out, Op::Mul { a: g_val, b: saved });
+                            kernel.raw.accum_var(out, Op::Mul { a: g_val, b: saved });
 
                             deepest.append(&mut deep);
                         }
 
                         Some(1) => {
-                            let g_val = kernel.def_var(
+                            let g_val = kernel.raw.def_var(
                                 DType::Float,
                                 ValueState::Mut,
                                 Some(Op::ConstF32 { value: 0.0 }),
@@ -389,7 +389,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
 
                             let saved = read_saved(kernel, idx, saved_params[user]);
 
-                            kernel.accum_var(out, Op::Mul { a: g_val, b: saved });
+                            kernel.raw.accum_var(out, Op::Mul { a: g_val, b: saved });
 
                             deepest.append(&mut deep);
                         }
@@ -433,7 +433,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                     &Self,
                     &[Option<ParamId>],
                     &[Option<ParamId>],
-                    &mut Kernel,
+                    &mut LinkedKernel,
                     ValueId,
                     ValueId,
                     ValueId,
@@ -452,7 +452,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                         out: ValueId,
                         node_params: &[Option<ParamId>],
                         saved_params: &[Option<ParamId>],
-                        kernel: &mut Kernel,
+                        kernel: &mut LinkedKernel,
                         base: ValueId,
                         idx: ValueId,
                         local_row: ValueId,
@@ -468,7 +468,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             let a = graph.nodes[node_id].inputs[0];
                             let b = graph.nodes[node_id].inputs[1];
 
-                            let a_val = kernel.def_var(DType::Float, ValueState::Mut, None);
+                            let a_val = kernel.raw.def_var(DType::Float, ValueState::Mut, None);
 
                             let mut a_deep = eval_node(
                                 root,
@@ -490,7 +490,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                                 options,
                             )?;
 
-                            let b_val = kernel.def_var(DType::Float, ValueState::Mut, None);
+                            let b_val = kernel.raw.def_var(DType::Float, ValueState::Mut, None);
 
                             let mut b_deep = eval_node(
                                 root,
@@ -515,7 +515,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             deepest.append(&mut a_deep);
                             deepest.append(&mut b_deep);
 
-                            kernel.overwrite_var(out, Op::Sub { a: a_val, b: b_val });
+                            kernel.raw.overwrite_var(out, Op::Sub { a: a_val, b: b_val });
                         }
 
                         Some(0) => {
@@ -543,7 +543,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                         }
 
                         Some(1) => {
-                            let g_val = kernel.def_var(
+                            let g_val = kernel.raw.def_var(
                                 DType::Float,
                                 ValueState::Mut,
                                 Some(Op::ConstF32 { value: 0.0 }),
@@ -569,7 +569,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                                 options,
                             )?;
 
-                            kernel.accum_var(out, Op::Neg { x: g_val });
+                            kernel.raw.accum_var(out, Op::Neg { x: g_val });
 
                             deepest.append(&mut deep);
                         }
@@ -613,7 +613,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                     &Self,
                     &[Option<ParamId>],
                     &[Option<ParamId>],
-                    &mut Kernel,
+                    &mut LinkedKernel,
                     ValueId,
                     ValueId,
                     ValueId,
@@ -632,7 +632,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                         out: ValueId,
                         node_params: &[Option<ParamId>],
                         saved_params: &[Option<ParamId>],
-                        kernel: &mut Kernel,
+                        kernel: &mut LinkedKernel,
                         base: ValueId,
                         idx: ValueId,
                         local_row: ValueId,
@@ -648,7 +648,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             let a = graph.nodes[node_id].inputs[0];
                             let b = graph.nodes[node_id].inputs[1];
 
-                            let a_val = kernel.def_var(DType::Float, ValueState::Mut, None);
+                            let a_val = kernel.raw.def_var(DType::Float, ValueState::Mut, None);
 
                             let mut a_deep = eval_node(
                                 root,
@@ -670,7 +670,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                                 options,
                             )?;
 
-                            let b_val = kernel.def_var(DType::Float, ValueState::Mut, None);
+                            let b_val = kernel.raw.def_var(DType::Float, ValueState::Mut, None);
 
                             let mut b_deep = eval_node(
                                 root,
@@ -695,11 +695,11 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             deepest.append(&mut a_deep);
                             deepest.append(&mut b_deep);
 
-                            kernel.overwrite_var(out, Op::Div { a: a_val, b: b_val });
+                            kernel.raw.overwrite_var(out, Op::Div { a: a_val, b: b_val });
                         }
 
                         Some(0) => {
-                            let g_val = kernel.def_var(
+                            let g_val = kernel.raw.def_var(
                                 DType::Float,
                                 ValueState::Mut,
                                 Some(Op::ConstF32 { value: 0.0 }),
@@ -729,13 +729,13 @@ impl<B: GpuBackend + Clone> Graph<B> {
 
                             let saved = read_saved(kernel, idx, saved_params[user]);
 
-                            kernel.accum_var(out, Op::Div { a: g_val, b: saved });
+                            kernel.raw.accum_var(out, Op::Div { a: g_val, b: saved });
 
                             deepest.append(&mut deep);
                         }
 
                         Some(1) => {
-                            let g_val = kernel.def_var(
+                            let g_val = kernel.raw.def_var(
                                 DType::Float,
                                 ValueState::Mut,
                                 Some(Op::ConstF32 { value: 0.0 }),
@@ -768,25 +768,25 @@ impl<B: GpuBackend + Clone> Graph<B> {
 
                             let b_val = read_saved(kernel, idx, saved_params[b]);
 
-                            let bb = kernel.def_var(
+                            let bb = kernel.raw.def_var(
                                 DType::Float,
                                 ValueState::Inline,
                                 Some(Op::Mul { a: b_val, b: b_val }),
                             );
 
-                            let neg_g_val = kernel.def_var(
+                            let neg_g_val = kernel.raw.def_var(
                                 DType::Float,
                                 ValueState::Inline,
                                 Some(Op::Neg { x: g_val }),
                             );
 
-                            let a_div_bb = kernel.def_var(
+                            let a_div_bb = kernel.raw.def_var(
                                 DType::Float,
                                 ValueState::Inline,
                                 Some(Op::Div { a: a_val, b: bb }),
                             );
 
-                            kernel.accum_var(
+                            kernel.raw.accum_var(
                                 out,
                                 Op::Mul {
                                     a: neg_g_val,
@@ -836,15 +836,17 @@ fn get_shape<B: GpuBackend + Clone>(a: NodeId, b: NodeId, graph: &Graph<B>) -> V
     }
 }
 
-fn read_saved(kernel: &mut Kernel, index: ValueId, param: Option<ParamId>) -> ValueId {
+fn read_saved(kernel: &mut LinkedKernel, index: ValueId, param: Option<ParamId>) -> ValueId {
     if let Some(pid) = param {
-        kernel.def_var(
+        kernel.register_param(pid);
+
+        kernel.raw.def_var(
             DType::Float,
             ValueState::Immut,
             Some(Op::ParamLoad { param: pid, index }),
         )
     } else {
-        kernel.def_var(
+        kernel.raw.def_var(
             DType::Float,
             ValueState::Inline,
             Some(Op::ConstF32 { value: 0.0 }),

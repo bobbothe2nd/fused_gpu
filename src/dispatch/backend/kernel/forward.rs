@@ -2,14 +2,10 @@ use core::cmp::Ordering;
 
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend,
-        backend::{
-            Axis, DType, DispatchOptions, Graph, GraphOp, Metadata, NodeId, Op, Param, ParamId,
-            ParamTy, ValueId, ValueState,
-            kernel::{Dependencies, Kernel, NodeInput, SaveIndicator},
+        CompilationOptions, GpuBackend, backend::{
+            Axis, DType, DispatchOptions, Graph, GraphOp, Metadata, NodeId, Op, Param, ParamId, ParamTy, ValueId, ValueState, kernel::{Dependencies, KernelsChained, LinkedKernel, NodeInput, RawKernel, SaveIndicator},
         },
-    },
-    errors::{Error, ErrorKind},
+    }, errors::{Error, ErrorKind},
 };
 use alloc::{vec, vec::Vec};
 
@@ -19,8 +15,8 @@ pub fn lower_forward<B: GpuBackend + Clone>(
     meta: Metadata,
     saved: &[SaveIndicator],
     options: &CompilationOptions<B>,
-) -> Result<Vec<Dependencies<Kernel>>, Error> {
-    let mut kernels: Vec<Dependencies<Kernel>> = Vec::new();
+) -> Result<KernelsChained, Error> {
+    let mut kernels: Vec<Dependencies<LinkedKernel>> = Vec::new();
 
     let mut roots = Vec::new();
 
@@ -37,6 +33,7 @@ pub fn lower_forward<B: GpuBackend + Clone>(
     params.push(Param {
         dtype: DType::UnsignedInt,
         ty: ParamTy::Uniform,
+        pid: 0,
     });
 
     let mut saved_params = vec![None; graph.nodes.len()];
@@ -48,6 +45,7 @@ pub fn lower_forward<B: GpuBackend + Clone>(
             params.push(Param {
                 dtype: DType::Float,
                 ty: ParamTy::ReadWrite,
+                pid,
             });
         }
     }
@@ -67,6 +65,7 @@ pub fn lower_forward<B: GpuBackend + Clone>(
                     Param {
                         dtype: DType::Float,
                         ty: ParamTy::ReadOnly,
+                        pid: params.len(),
                     },
                     &mut params,
                 );
@@ -80,6 +79,7 @@ pub fn lower_forward<B: GpuBackend + Clone>(
     params.push(Param {
         dtype: DType::Float,
         ty: ParamTy::ReadWrite,
+        pid: output_param,
     });
 
     let mut resolved = Vec::new();
@@ -98,23 +98,27 @@ pub fn lower_forward<B: GpuBackend + Clone>(
 
             let root_node = &graph.nodes[root];
 
-            let mut kernel = Kernel {
-                meta,
-                params: params.clone(),
-                shared: Vec::new(),
-                values: Vec::new(),
-                ops: Vec::new(),
-                block: [tile_size, tile_size, 1],
-                root,
-                iter_space: root_node.shape.clone(),
+            let mut kernel = LinkedKernel {
+                raw: RawKernel {
+                    meta,
+                    shared: Vec::new(),
+                    values: Vec::new(),
+                    ops: Vec::new(),
+                    block: [tile_size, tile_size, 1],
+                    root,
+                    iter_space: root_node.shape.clone(),
+                },
+                params: vec![false; params.len()],
             };
+
+            kernel.register_param(0);
 
             let shared_size = tile_size * tile_size;
 
             let mut dims = Vec::new();
 
             for &meta_index in &root_node.shape {
-                let dim_val = kernel.def_var(
+                let dim_val = kernel.raw.def_var(
                     DType::UnsignedInt,
                     ValueState::Immut,
                     Some(Op::ReadMeta {
@@ -126,26 +130,26 @@ pub fn lower_forward<B: GpuBackend + Clone>(
                 dims.push(dim_val);
             }
 
-            let gid = kernel.def_var(
+            let gid = kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Mut,
                 Some(Op::GlobalId { axis: Axis::X }),
             );
 
-            let mut base = kernel.def_var(
+            let mut base = kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Immut,
                 Some(Op::ConstU32 { value: 0 }),
             );
 
             let total = dims[0];
-            kernel.update_var_state(total, ValueState::Mut);
+            kernel.raw.update_var_state(total, ValueState::Mut);
 
             if dims.len() > 1 {
-                let gid2 = kernel.def_var(DType::UnsignedInt, ValueState::Mut, None);
+                let gid2 = kernel.raw.def_var(DType::UnsignedInt, ValueState::Mut, None);
 
                 for (i, &d) in dims.iter().enumerate().skip(1) {
-                    kernel.overwrite_var(
+                    kernel.raw.overwrite_var(
                         gid2,
                         Op::GlobalId {
                             axis: (i as u8).try_into().unwrap_or(Axis::Z),
@@ -153,39 +157,39 @@ pub fn lower_forward<B: GpuBackend + Clone>(
                     );
 
                     if i >= 2 {
-                        kernel.overwrite_var(gid2, Op::Mul { a: total, b: gid2 });
+                        kernel.raw.overwrite_var(gid2, Op::Mul { a: total, b: gid2 });
 
                         if i == 2 {
-                            kernel.update_var_state(base, ValueState::Masked);
+                            kernel.raw.update_var_state(base, ValueState::Masked);
                             base = gid2;
                         }
                     } else {
-                        kernel.overwrite_var(gid2, Op::Mul { a: d, b: gid2 });
+                        kernel.raw.overwrite_var(gid2, Op::Mul { a: d, b: gid2 });
                     }
 
-                    kernel.overwrite_var(gid, Op::Add { a: gid, b: gid2 });
+                    kernel.raw.overwrite_var(gid, Op::Add { a: gid, b: gid2 });
 
-                    kernel.overwrite_var(total, Op::Mul { a: total, b: d });
+                    kernel.raw.overwrite_var(total, Op::Mul { a: total, b: d });
                 }
             }
 
-            let tile_size = kernel.def_var(
+            let tile_size = kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Const,
                 Some(Op::ConstU32 { value: tile_size }),
             );
-            let local_row = kernel.def_var(
+            let local_row = kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Immut,
                 Some(Op::LocalId { axis: Axis::Y }),
             );
-            let local_col = kernel.def_var(
+            let local_col = kernel.raw.def_var(
                 DType::UnsignedInt,
                 ValueState::Immut,
                 Some(Op::LocalId { axis: Axis::X }),
             );
 
-            let out = kernel.def_var(DType::Float, ValueState::Mut, None);
+            let out = kernel.raw.def_var(DType::Float, ValueState::Mut, None);
 
             let new_roots = eval_node(
                 root,
@@ -215,11 +219,11 @@ pub fn lower_forward<B: GpuBackend + Clone>(
                         DispatchOptions::Any => {}
 
                         DispatchOptions::ReqRow => {
-                            kernel.block = [1, shared_size, 1];
+                            kernel.raw.block = [1, shared_size, 1];
                         }
 
                         DispatchOptions::ReqCol => {
-                            kernel.block = [shared_size, 1, 1];
+                            kernel.raw.block = [shared_size, 1, 1];
                         }
                     }
                 }
@@ -231,12 +235,12 @@ pub fn lower_forward<B: GpuBackend + Clone>(
                 roots.push(*inner_root);
             }
 
-            if depth == 0 && graph.nodes[kernel.root].op.is_compute_gid() {
+            if depth == 0 && graph.nodes[kernel.raw.root].op.is_compute_gid() {
                 kernel.param_store(output_param, gid, out);
             }
 
             for kernel in &mut kernels {
-                if kernel.val.root > root {
+                if kernel.val.raw.root > root {
                     kernel.dep.push(root);
                 }
             }
@@ -248,7 +252,10 @@ pub fn lower_forward<B: GpuBackend + Clone>(
         }
     }
 
-    Ok(kernels)
+    Ok(KernelsChained {
+        kernels,
+        params,
+    })
 }
 
 #[inline]
@@ -275,7 +282,7 @@ fn eval_node<B: GpuBackend + Clone>(
     graph: &Graph<B>,
     node_params: &[Option<ParamId>],
     saved_params: &[Option<ParamId>],
-    kernel: &mut Kernel,
+    kernel: &mut LinkedKernel,
     idx: ValueId,
     base: ValueId,
     local_row: ValueId,
@@ -312,11 +319,12 @@ fn eval_node<B: GpuBackend + Clone>(
                 ctx: (),
             })?;
 
-            kernel.overwrite_var(out, Op::ParamLoad { param, index: idx });
+            kernel.raw.overwrite_var(out, Op::ParamLoad { param, index: idx });
+            kernel.register_param(param);
         }
 
         GraphOp::ConstF32(value) => {
-            kernel.overwrite_var(out, Op::ConstF32 { value });
+            kernel.raw.overwrite_var(out, Op::ConstF32 { value });
         }
 
         GraphOp::Custom {
@@ -355,7 +363,9 @@ fn eval_node<B: GpuBackend + Clone>(
                     kind: ErrorKind::ParamNotMaterialized,
                     ctx: (),
                 })?;
-                kernel.overwrite_var(out, Op::ParamLoad { param, index: idx });
+                kernel.raw.overwrite_var(out, Op::ParamLoad { param, index: idx });
+
+                kernel.register_param(param);
 
                 return Ok(deepest);
             }

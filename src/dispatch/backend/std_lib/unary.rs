@@ -3,7 +3,7 @@ use crate::{
         CompilationOptions, GpuBackend,
         backend::{
             DType, DispatchOptions, Graph, GraphOp, Node, NodeId, Op, ParamId, ValueId, ValueState,
-            kernel::{Kernel, NodeInput, SaveIndicator},
+            kernel::{LinkedKernel, NodeInput, SaveIndicator},
         },
     },
     errors::{Error, ErrorKind, GraphErrorContext},
@@ -63,7 +63,7 @@ macro_rules! lower_unary {
             &Graph<B>,
             &[Option<ParamId>],
             &[Option<ParamId>],
-            &mut Kernel,
+            &mut LinkedKernel,
             ValueId,
             ValueId,
             ValueId,
@@ -82,7 +82,7 @@ macro_rules! lower_unary {
          out: ValueId,
          node_params: &[Option<ParamId>],
          saved_params: &[Option<ParamId>],
-         kernel: &mut Kernel,
+         kernel: &mut LinkedKernel,
          base: ValueId,
          idx: ValueId,
          local_row: ValueId,
@@ -96,7 +96,7 @@ macro_rules! lower_unary {
             match backwardness {
                 None => {
                     let node_input = graph.nodes[node_id].inputs[0];
-                    let upstream = kernel.def_var(
+                    let upstream = kernel.raw.def_var(
                         DType::Float,
                         ValueState::Mut,
                         Some(Op::ConstF32 { value: 0.0 }),
@@ -142,7 +142,7 @@ macro_rules! lower_unary {
                 Some(0) => {
                     let node = &graph.nodes[node_id];
 
-                    let saved = kernel.def_var(
+                    let saved = kernel.raw.def_var(
                         DType::Float,
                         ValueState::Mut,
                         Some(Op::ConstF32 { value: 0.0 }),
@@ -178,7 +178,7 @@ macro_rules! lower_unary {
                         Vec::new()
                     };
 
-                    let acc = kernel.def_var(
+                    let acc = kernel.raw.def_var(
                         DType::Float,
                         ValueState::Mut,
                         Some(Op::ConstF32 { value: 0.0 }),
@@ -229,9 +229,11 @@ impl<B: GpuBackend + Clone> Graph<B> {
             GraphOp::Custom {
                 lower: lower_unary!(
                     true,
-                    |kernel: &mut Kernel, out: ValueId, inp: ValueId| kernel
+                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId| kernel
+                        .raw
                         .overwrite_var(out, Op::Log { x: inp }),
-                    |kernel: &mut Kernel, out: ValueId, inp: ValueId, upstream: ValueId| kernel
+                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId, upstream: ValueId| kernel
+                        .raw
                         .accum_var(
                             out,
                             Op::Div {
@@ -261,20 +263,21 @@ impl<B: GpuBackend + Clone> Graph<B> {
             GraphOp::Custom {
                 lower: lower_unary!(
                     true,
-                    |kernel: &mut Kernel, out: ValueId, inp: ValueId| kernel
+                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId| kernel
+                        .raw
                         .overwrite_var(out, Op::Tanh { x: inp }),
-                    |kernel: &mut Kernel, out: ValueId, inp: ValueId, upstream: ValueId| {
-                        let one = kernel.def_var(
+                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId, upstream: ValueId| {
+                        let one = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::ConstF32 { value: 1.0 }),
                         );
-                        let forward_squared = kernel.def_var(
+                        let forward_squared = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Mul { a: inp, b: inp }),
                         );
-                        let one_minus_forward_squared = kernel.def_var(
+                        let one_minus_forward_squared = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Sub {
@@ -282,7 +285,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                                 b: forward_squared,
                             }),
                         );
-                        kernel.accum_var(
+                        kernel.raw.accum_var(
                             out,
                             Op::Mul {
                                 a: upstream,
@@ -312,35 +315,35 @@ impl<B: GpuBackend + Clone> Graph<B> {
             GraphOp::Custom {
                 lower: lower_unary!(
                     true,
-                    |kernel: &mut Kernel, out: ValueId, inp: ValueId| {
-                        let zero = kernel.def_var(
+                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId| {
+                        let zero = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::ConstF32 { value: 0.0 }),
                         );
-                        let one = kernel.def_var(
+                        let one = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::ConstF32 { value: 1.0 }),
                         );
 
-                        let exp_inp = kernel.def_var(
+                        let exp_inp = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Exp { x: inp }),
                         );
-                        let exp_inp_minus_one = kernel.def_var(
+                        let exp_inp_minus_one = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Sub { a: exp_inp, b: one }),
                         );
 
-                        let cond = kernel.def_var(
+                        let cond = kernel.raw.def_var(
                             DType::Bool,
                             ValueState::Inline,
                             Some(Op::Ge { a: inp, b: zero }),
                         );
-                        kernel.overwrite_var(
+                        kernel.raw.overwrite_var(
                             out,
                             Op::Select {
                                 cond,
@@ -349,24 +352,24 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             },
                         );
                     },
-                    |kernel: &mut Kernel, out: ValueId, inp: ValueId, upstream: ValueId| {
-                        let zero = kernel.def_var(
+                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId, upstream: ValueId| {
+                        let zero = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::ConstF32 { value: 0.0 }),
                         );
-                        let one = kernel.def_var(
+                        let one = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::ConstF32 { value: 1.0 }),
                         );
 
-                        let forward_plus_one = kernel.def_var(
+                        let forward_plus_one = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Add { a: inp, b: one }),
                         );
-                        let upstream_forward_plus_one = kernel.def_var(
+                        let upstream_forward_plus_one = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Mul {
@@ -375,12 +378,12 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             }),
                         );
 
-                        let cond = kernel.def_var(
+                        let cond = kernel.raw.def_var(
                             DType::Bool,
                             ValueState::Inline,
                             Some(Op::Ge { a: inp, b: zero }),
                         );
-                        kernel.accum_var(
+                        kernel.raw.accum_var(
                             out,
                             Op::Select {
                                 cond,
@@ -411,30 +414,30 @@ impl<B: GpuBackend + Clone> Graph<B> {
             GraphOp::Custom {
                 lower: lower_unary!(
                     true,
-                    |kernel: &mut Kernel, out: ValueId, inp: ValueId| {
-                        let zero = kernel.def_var(
+                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId| {
+                        let zero = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::ConstF32 { value: 0.0 }),
                         );
 
-                        kernel.overwrite_var(out, Op::Max { a: inp, b: zero });
+                        kernel.raw.overwrite_var(out, Op::Max { a: inp, b: zero });
                     },
-                    |kernel: &mut Kernel, out: ValueId, inp: ValueId, upstream: ValueId| {
-                        let zero = kernel.def_var(
+                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId, upstream: ValueId| {
+                        let zero = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::ConstF32 { value: 0.0 }),
                         );
 
-                        let cond = kernel.def_var(
+                        let cond = kernel.raw.def_var(
                             DType::Bool,
                             ValueState::Inline,
                             Some(Op::Ge { a: inp, b: zero }),
                         );
 
                         kernel.push_if(cond, |kernel| {
-                            kernel.accum_var(out, Op::CopyVar { id: upstream });
+                            kernel.raw.accum_var(out, Op::CopyVar { id: upstream });
                         });
                     },
                 ),
@@ -462,57 +465,57 @@ impl<B: GpuBackend + Clone> Graph<B> {
             GraphOp::Custom {
                 lower: lower_unary!(
                     true,
-                    |kernel: &mut Kernel, out: ValueId, inp: ValueId| {
-                        let gelu_a = kernel.def_var(
+                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId| {
+                        let gelu_a = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::ConstF32 {
                                 value: THAT_RANDOM_DECIMAL,
                             }),
                         );
-                        let gelu_b = kernel.def_var(
+                        let gelu_b = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::ConstF32 {
                                 value: SQRT_FRAC_PI_2,
                             }),
                         );
-                        let half = kernel.def_var(
+                        let half = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::ConstF32 { value: 0.5 }),
                         );
-                        let one = kernel.def_var(
+                        let one = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::ConstF32 { value: 1.0 }),
                         );
 
-                        let xx = kernel.def_var(
+                        let xx = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Mul { a: inp, b: inp }),
                         );
 
-                        let xxx = kernel.def_var(
+                        let xxx = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Mul { a: xx, b: inp }),
                         );
 
-                        let a_x3 = kernel.def_var(
+                        let a_x3 = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Mul { a: xxx, b: gelu_a }),
                         );
 
-                        let x_plus_a_x3 = kernel.def_var(
+                        let x_plus_a_x3 = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Add { a: inp, b: a_x3 }),
                         );
 
-                        let b_x_plus_a_x3 = kernel.def_var(
+                        let b_x_plus_a_x3 = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Mul {
@@ -521,25 +524,25 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             }),
                         );
 
-                        let tanh_u = kernel.def_var(
+                        let tanh_u = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Tanh { x: b_x_plus_a_x3 }),
                         );
 
-                        let one_plus_tanh_u = kernel.def_var(
+                        let one_plus_tanh_u = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Add { a: one, b: tanh_u }),
                         );
 
-                        let half_x = kernel.def_var(
+                        let half_x = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Mul { a: half, b: inp }),
                         );
 
-                        kernel.overwrite_var(
+                        kernel.raw.overwrite_var(
                             out,
                             Op::Mul {
                                 a: half_x,
@@ -549,37 +552,37 @@ impl<B: GpuBackend + Clone> Graph<B> {
 
                         tanh_u
                     },
-                    |kernel: &mut Kernel, out: ValueId, inp: ValueId, upstream: ValueId| {
-                        let half = kernel.def_var(
+                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId, upstream: ValueId| {
+                        let half = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::ConstF32 { value: 0.5 }),
                         );
-                        let one = kernel.def_var(
+                        let one = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::ConstF32 { value: 1.0 }),
                         );
-                        let three = kernel.def_var(
+                        let three = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::ConstF32 { value: 3.0 }),
                         );
-                        let gelu_a = kernel.def_var(
+                        let gelu_a = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::ConstF32 {
                                 value: THAT_RANDOM_DECIMAL,
                             }),
                         );
-                        let gelu_b = kernel.def_var(
+                        let gelu_b = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::ConstF32 {
                                 value: SQRT_FRAC_PI_2,
                             }),
                         );
-                        let gelu_c = kernel.def_var(
+                        let gelu_c = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Const,
                             Some(Op::Mul {
@@ -588,43 +591,43 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             }),
                         );
 
-                        let xx = kernel.def_var(
+                        let xx = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Mul { a: inp, b: inp }),
                         );
 
-                        let one_plus_t = kernel.def_var(
+                        let one_plus_t = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Immut,
                             Some(Op::Add { a: one, b: inp }),
                         );
 
-                        let tt = kernel.def_var(
+                        let tt = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Mul { a: inp, b: inp }),
                         );
 
-                        let one_minus_tt = kernel.def_var(
+                        let one_minus_tt = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Immut,
                             Some(Op::Sub { a: one, b: tt }),
                         );
 
-                        let c_xx = kernel.def_var(
+                        let c_xx = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Mul { a: gelu_c, b: xx }),
                         );
 
-                        let one_plus_c_xx = kernel.def_var(
+                        let one_plus_c_xx = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Add { a: one, b: c_xx }),
                         );
 
-                        let du_dx = kernel.def_var(
+                        let du_dx = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Immut,
                             Some(Op::Mul {
@@ -633,13 +636,13 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             }),
                         );
 
-                        let x_du_dx = kernel.def_var(
+                        let x_du_dx = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Immut,
                             Some(Op::Mul { a: inp, b: du_dx }),
                         );
 
-                        let one_minus_tt_x_du_dx = kernel.def_var(
+                        let one_minus_tt_x_du_dx = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Immut,
                             Some(Op::Mul {
@@ -648,7 +651,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             }),
                         );
 
-                        let two_dy_dx = kernel.def_var(
+                        let two_dy_dx = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Immut,
                             Some(Op::Add {
@@ -657,7 +660,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             }),
                         );
 
-                        let dy_dx = kernel.def_var(
+                        let dy_dx = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Immut,
                             Some(Op::Mul {
@@ -666,7 +669,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             }),
                         );
 
-                        kernel.accum_var(
+                        kernel.raw.accum_var(
                             out,
                             Op::Mul {
                                 a: upstream,
@@ -697,9 +700,11 @@ impl<B: GpuBackend + Clone> Graph<B> {
             GraphOp::Custom {
                 lower: lower_unary!(
                     true,
-                    |kernel: &mut Kernel, out: ValueId, inp: ValueId| kernel
+                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId| kernel
+                        .raw
                         .overwrite_var(out, Op::Exp { x: inp }),
-                    |kernel: &mut Kernel, out: ValueId, inp: ValueId, upstream: ValueId| kernel
+                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId, upstream: ValueId| kernel
+                        .raw
                         .accum_var(
                             out,
                             Op::Mul {
@@ -729,20 +734,21 @@ impl<B: GpuBackend + Clone> Graph<B> {
             GraphOp::Custom {
                 lower: lower_unary!(
                     true,
-                    |kernel: &mut Kernel, out: ValueId, inp: ValueId| kernel
+                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId| kernel
+                        .raw
                         .overwrite_var(out, Op::Abs { x: inp }),
-                    |kernel: &mut Kernel, out: ValueId, inp: ValueId, upstream: ValueId| {
-                        let zero = kernel.def_var(
+                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId, upstream: ValueId| {
+                        let zero = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::ConstF32 { value: 0.0 }),
                         );
-                        let ge0 = kernel.def_var(
+                        let ge0 = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Ge { a: inp, b: zero }),
                         );
-                        let le0 = kernel.def_var(
+                        let le0 = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
                             Some(Op::Ge { a: inp, b: zero }),
@@ -750,16 +756,16 @@ impl<B: GpuBackend + Clone> Graph<B> {
                         kernel.push_if_else(
                             ge0,
                             |kernel| {
-                                kernel.accum_var(out, Op::CopyVar { id: upstream });
+                                kernel.raw.accum_var(out, Op::CopyVar { id: upstream });
                             },
-                            |kernel: &mut Kernel| {
+                            |kernel: &mut LinkedKernel| {
                                 kernel.push_if_else(
                                     le0,
                                     |kernel| {
-                                        kernel.accum_var(out, Op::Neg { x: upstream });
+                                        kernel.raw.accum_var(out, Op::Neg { x: upstream });
                                     },
-                                    |kernel: &mut Kernel| {
-                                        kernel.accum_var(out, Op::ConstF32 { value: 0.0 });
+                                    |kernel: &mut LinkedKernel| {
+                                        kernel.raw.accum_var(out, Op::ConstF32 { value: 0.0 });
                                     },
                                 );
                             },
@@ -787,9 +793,11 @@ impl<B: GpuBackend + Clone> Graph<B> {
             GraphOp::Custom {
                 lower: lower_unary!(
                     false,
-                    |kernel: &mut Kernel, out: ValueId, inp: ValueId| kernel
+                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId| kernel
+                        .raw
                         .overwrite_var(out, Op::Neg { x: inp }),
-                    |kernel: &mut Kernel, out: ValueId, _: ValueId, upstream: ValueId| kernel
+                    |kernel: &mut LinkedKernel, out: ValueId, _: ValueId, upstream: ValueId| kernel
+                        .raw
                         .accum_var(out, Op::Neg { x: upstream }),
                 ),
                 display: |inputs| format!("-{:?}", inputs[0]),

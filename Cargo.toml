@@ -43,7 +43,7 @@ pollster = "0.4.0"
 [target.'cfg(target_family = "windows")'.dependencies.wgpu]
 version = "30.0.0"
 default-features = false
-features = ["wgsl", "dx12"]
+features = ["wgsl", "dx12", "vulkan"]
 optional = true
 
 [target.'cfg(target_os = "macos")'.dependencies.wgpu]

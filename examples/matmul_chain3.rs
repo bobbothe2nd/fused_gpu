@@ -1,11 +1,7 @@
 use std::time::Instant;
 
-use fused_gpu::{
-    dispatch::{
-        AllocTensors, CompilationOptions, GpuContext, KernelGroup,
-        backend::{Graph, LossType, Metadata, kernel::Kernel},
-    },
-    tensor::Tensor,
+use fused_gpu::dispatch::{
+    CompilationOptions, GpuContext, Schedule, backend::{Graph, LossType, Metadata, kernel::KernelsChained},
 };
 
 fn matmul_chain3_forward_backward() {
@@ -39,7 +35,7 @@ fn matmul_chain3_forward_backward() {
     let z = graph.matmul(y, d);
     graph.add(z, e);
 
-    let saved = Kernel::compute_saved_nodes(&graph);
+    let saved = KernelsChained::compute_saved_nodes(&graph);
     let options = CompilationOptions::default();
 
     let compile_start = Instant::now();
@@ -78,23 +74,22 @@ fn matmul_chain3_forward_backward() {
 
     println!("TENSOR INIT TIME: {tensor_elapsed:?} elapsed");
 
-    model_runtime(&ctx, &kernels, &meta_binding, &in_tensors, &saved_tensors);
+    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+
+    model_runtime(&ctx, &schedule);
 }
 
 fn model_runtime(
     ctx: &GpuContext,
-    kernels: &KernelGroup,
-    meta_binding: &[u32],
-    in_tensors: &[Tensor],
-    saved_tensors: &AllocTensors,
+    schedule: &Schedule,
 ) {
     for iters in [100, 10, 1] {
         let runtime_start = Instant::now();
 
         for _ in 0..iters {
-            ctx.launch_forward(kernels, meta_binding, in_tensors, saved_tensors);
+            ctx.launch_forward(schedule);
 
-            ctx.launch_backward(kernels, meta_binding, in_tensors, saved_tensors);
+            ctx.launch_backward(schedule);
         }
 
         let runtime_elapsed = runtime_start.elapsed();

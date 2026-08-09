@@ -5,11 +5,8 @@ use core::{fmt::Debug, marker::PhantomData};
 
 use crate::{
     dispatch::backend::{
-        Graph, MetaId, Param,
-        kernel::{Dependencies, Kernel, SaveIndicator},
-    },
-    errors::Error,
-    tensor::{Tensor, build_dims, calc_grid},
+        Graph, MetaId, NodeId, Param, kernel::{Dependencies, RawKernel, SaveIndicator},
+    }, errors::Error, tensor::{Tensor, build_dims},
 };
 use briny::{
     raw::{slice_to_bytes, slice_to_bytes_mut},
@@ -110,13 +107,15 @@ pub trait GpuKernelBackend {
     fn block(&self) -> &[u32; 3];
 }
 
-pub trait GpuBackend {
+pub trait GpuBackend: Sized {
     const TARGET_SPEC: TargetCompilationOptions<Self>;
 
     type Buffer: GpuBufferBackend;
     type Kernel: GpuKernelBackend;
     type SubmissionIndex;
     type ParamLayout;
+    type Schedule<'a>;
+    type SyncSubmissions;
 
     fn alloc(&self, len: usize) -> Self::Buffer;
 
@@ -128,29 +127,41 @@ pub trait GpuBackend {
 
     fn download(&self, buffer: &Self::Buffer, out: &mut [u8]) -> Result<(), Error>;
 
-    fn init_params(
-        &self,
-        src: &[Param],
-        options: &CompilationOptions<Self>,
-    ) -> Result<Self::ParamLayout, Error>;
-
     fn compile(
         &self,
-        src: &Kernel,
-        params: &Self::ParamLayout,
+        src: &RawKernel,
+        params: &[Param],
         options: &CompilationOptions<Self>,
     ) -> Result<Self::Kernel, Error>;
 
-    fn launch(
+    fn schedule<'a>(
+        &self,
+        kernels: &'a [(Dependencies<Self::Kernel>, NodeId, &[bool])],
+        bindings: &[&'a Self::Buffer],
+        meta: &[u32],
+    ) -> Self::Schedule<'a>;
+
+    fn launch_schedule(
+        &self,
+        schedule: &Self::Schedule<'_>,
+    );
+
+    fn launch_kernel(
         &self,
         kernel: &Self::Kernel,
         wg: [u32; 3],
         bindings: &[&Self::Buffer],
-    ) -> Self::SubmissionIndex;
+    ) -> Self::SyncSubmissions;
 
     fn sync(&self, submission_index: Self::SubmissionIndex);
 
+    fn submit(&self, submission: Self::SyncSubmissions) -> Self::SubmissionIndex;
+
     fn poll(&self) -> PollStatus;
+}
+
+pub trait Pipeline<B: GpuBackend> {
+    fn submit(&self) -> B::SubmissionIndex;
 }
 
 /// Allocate a buffer on the GPU.
@@ -187,9 +198,9 @@ impl<B: GpuBackend> GpuBuffer<B> {
 }
 
 #[derive(Debug)]
-pub struct KernelGroup<B: GpuBackend = backend::GpuContext> {
-    pub(crate) forward: Vec<(Dependencies<B::Kernel>, usize)>,
-    pub(crate) backward: Vec<(Dependencies<B::Kernel>, usize)>,
+pub struct KernelGroup<'a, B: GpuBackend = backend::GpuContext> {
+    pub(crate) forward: Vec<(Dependencies<B::Kernel>, usize, &'a [bool])>,
+    pub(crate) backward: Vec<(Dependencies<B::Kernel>, usize, &'a [bool])>,
     pub(crate) loss: B::Kernel,
 }
 
@@ -200,6 +211,20 @@ impl<B: GpuBackend> SubmissionIndex<'_, B> {
     pub fn sync(self) {
         self.1.inner.sync(self.0);
     }
+}
+
+#[must_use]
+pub struct SyncSubmission<'a, B: GpuBackend>(B::SyncSubmissions, &'a GpuContext<B>);
+
+impl<'a, B: GpuBackend> SyncSubmission<'a, B> {
+    pub fn submit(self) -> SubmissionIndex<'a, B> {
+        SubmissionIndex(self.1.inner.submit(self.0), self.1)
+    }
+}
+
+pub struct Schedule<'a, B: GpuBackend = backend::GpuContext> {
+    forward: B::Schedule<'a>,
+    backward: B::Schedule<'a>,
 }
 
 /// Generic GPU context storing a handle to the device and shaders.
@@ -225,45 +250,56 @@ impl<B: GpuBackend> GpuContext<B> {
     }
 
     /// Compiles a graph into a kernels.
-    pub fn compile(
+    pub fn compile<'a>(
         &self,
-        ir: &backend::kernel::KernelGroup,
+        ir: &'a backend::kernel::KernelGroup,
         options: &CompilationOptions<B>,
-    ) -> Result<KernelGroup<B>, Error> {
-        let pipeline_layout = self.inner.init_params(&ir.forward[0].val.params, options)?;
+    ) -> Result<KernelGroup<'a, B>, Error> {
         let forward = ir
             .forward
+            .kernels
             .iter()
             .map(|kernel| {
+                let params = ir.forward.params.iter().enumerate().filter_map(|(i, param)| if kernel.val.params[i] {
+                    Some(*param)
+                } else {
+                    None
+                }).collect::<Vec<_>>();
+
                 Ok((
                     Dependencies {
-                        val: self.inner.compile(&kernel.val, &pipeline_layout, options)?,
+                        val: self.inner.compile(&kernel.val.raw, &params, options)?,
                         dep: kernel.dep.clone(),
                     },
-                    kernel.val.root,
+                    kernel.val.raw.root,
+                    kernel.val.params.as_slice(),
                 ))
             })
-            .collect::<Result<Vec<(Dependencies<<B as GpuBackend>::Kernel>, usize)>, Error>>()?;
+            .collect::<Result<Vec<(Dependencies<<B as GpuBackend>::Kernel>, usize, &'a [bool])>, Error>>()?;
 
-        let pipeline_layout = self
-            .inner
-            .init_params(&ir.backward[0].val.params, options)?;
         let backward = ir
             .backward
+            .kernels
             .iter()
             .map(|kernel| {
+                let params = ir.backward.params.iter().enumerate().filter_map(|(i, param)| if kernel.val.params[i] {
+                    Some(*param)
+                } else {
+                    None
+                }).collect::<Vec<_>>();
+
                 Ok((
                     Dependencies {
-                        val: self.inner.compile(&kernel.val, &pipeline_layout, options)?,
+                        val: self.inner.compile(&kernel.val.raw, &params, options)?,
                         dep: kernel.dep.clone(),
                     },
-                    kernel.val.root,
+                    kernel.val.raw.root,
+                    kernel.val.params.as_slice(),
                 ))
             })
-            .collect::<Result<Vec<(Dependencies<<B as GpuBackend>::Kernel>, usize)>, Error>>()?;
+            .collect::<Result<Vec<(Dependencies<<B as GpuBackend>::Kernel>, usize, &'a [bool])>, Error>>()?;
 
-        let pipeline_layout = self.inner.init_params(&ir.loss.params, options)?;
-        let loss = self.inner.compile(&ir.loss, &pipeline_layout, options)?;
+        let loss = self.inner.compile(&ir.loss.raw, &ir.loss.params, options)?;
 
         Ok(KernelGroup {
             forward,
@@ -287,21 +323,16 @@ impl<B: GpuBackend> GpuContext<B> {
             .map(|x| SubmissionIndex(x, self))
     }
 
-    /// Launches a forward kernel from the compiled kernels with metadata and tensors.
-    ///
-    /// This function relies on the assumption that tensors matches the graph inputs and
-    /// the metadata matches the graph metadata when compiling.
-    pub fn launch_forward(
+    pub fn schedule<'a>(
         &self,
-        kernels: &KernelGroup<B>,
+        kernels: &'a KernelGroup<B>,
         meta: &[u32],
-        in_tensors: &[Tensor<B>],
-        alloc_tensors: &AllocTensors<B>,
-    ) {
-        let mut bindings = Vec::with_capacity(2 + in_tensors.len());
+        in_tensors: &'a [Tensor<B>],
+        alloc_tensors: &'a AllocTensors<B>,
+    ) -> Schedule<'a, B> {
+        let mut bindings = Vec::new();
 
-        let meta_binding = self.inner.alloc_meta(meta);
-        bindings.push(&meta_binding);
+        bindings.push(&alloc_tensors.meta);
 
         for t in &alloc_tensors.forward_saved {
             bindings.push(&t.data.inner);
@@ -313,27 +344,41 @@ impl<B: GpuBackend> GpuContext<B> {
 
         bindings.push(&alloc_tensors.forward_out.data.inner);
 
-        let mut resolved = Vec::new();
-        let mut tmp_res = Vec::new();
+        let forward = self.inner.schedule(&kernels.forward, &bindings, meta);
 
-        while resolved.len() < kernels.forward.len() {
-            for (kernel, idx) in &kernels.forward {
-                if resolved.contains(idx) {
-                    continue;
-                }
+        bindings.truncate(1);
 
-                if kernel.dep.iter().all(|x| resolved.contains(x)) {
-                    tmp_res.push(*idx);
+        bindings.push(&alloc_tensors.seed.data.inner);
 
-                    let iter_space = build_dims(kernel.val.iteration_space(), meta);
-                    let grid = calc_grid(&iter_space, *kernel.val.block());
-
-                    self.inner.launch(&kernel.val, grid, &bindings);
-                }
-            }
-
-            resolved.append(&mut tmp_res);
+        for t in &alloc_tensors.grad_tensors {
+            bindings.push(&t.data.inner);
         }
+
+        for t in in_tensors {
+            bindings.push(&t.data.inner);
+        }
+
+        for t in &alloc_tensors.forward_saved {
+            bindings.push(&t.data.inner);
+        }
+
+        let backward = self.inner.schedule(&kernels.backward, &bindings, meta);
+
+        Schedule {
+            forward,
+            backward,
+        }
+    }
+
+    /// Launches a forward kernel from the compiled kernels with metadata and tensors.
+    ///
+    /// This function relies on the assumption that tensors matches the graph inputs and
+    /// the metadata matches the graph metadata when compiling.
+    pub fn launch_forward(
+        &self,
+        schedule: &Schedule<'_, B>,
+    ) {
+        self.inner.launch_schedule(&schedule.forward);
     }
 
     /// Launches a backward kernel from the compiled kernels with metadata and tensors.
@@ -342,73 +387,28 @@ impl<B: GpuBackend> GpuContext<B> {
     /// the metadata matches the graph metadata when compiling.
     pub fn launch_backward(
         &self,
-        kernels: &KernelGroup<B>,
-        meta: &[u32],
-        forward_tensors: &[Tensor<B>],
-        tensors: &AllocTensors<B>,
+        schedule: &Schedule<'_, B>,
     ) {
-        let mut bindings = Vec::new();
-
-        let meta_binding = self.inner.alloc_meta(meta);
-        bindings.push(&meta_binding);
-        bindings.push(&tensors.seed.data.inner);
-
-        for t in &tensors.grad_tensors {
-            bindings.push(&t.data.inner);
-        }
-
-        for t in forward_tensors {
-            bindings.push(&t.data.inner);
-        }
-
-        for t in &tensors.forward_saved {
-            bindings.push(&t.data.inner);
-        }
-
-        let mut resolved = Vec::new();
-        let mut tmp_res = Vec::new();
-
-        while resolved.len() < kernels.backward.len() {
-            for (kernel, idx) in &kernels.backward {
-                if resolved.contains(idx) {
-                    continue;
-                }
-
-                if kernel.dep.iter().all(|x| resolved.contains(x)) {
-                    tmp_res.push(*idx);
-
-                    let iter_space = build_dims(kernel.val.iteration_space(), meta);
-                    let grid = calc_grid(&iter_space, *kernel.val.block());
-
-                    self.inner.launch(&kernel.val, grid, &bindings);
-                }
-            }
-
-            resolved.append(&mut tmp_res);
-        }
+        self.inner.launch_schedule(&schedule.backward);
     }
 
     pub fn launch_loss(
         &self,
         kernels: &KernelGroup<B>,
-        meta: &[u32],
         target: &Tensor<B>,
         tensors: &AllocTensors<B>,
-    ) {
+    ) -> SyncSubmission<'_, B> {
         let grid = tensors.loss_t.calc_grid(*kernels.loss.block());
 
-        let meta_binding = self.inner.alloc_meta(meta);
         let bindings = [
-            &meta_binding,
+            &tensors.meta,
             &tensors.loss_t.data.inner,
             &tensors.seed.data.inner,
             &tensors.forward_out.data.inner,
             &target.data.inner,
         ];
 
-        let submission_index = self.inner.launch(&kernels.loss, grid, &bindings);
-
-        self.inner.sync(submission_index);
+        SyncSubmission(self.inner.launch_kernel(&kernels.loss, grid, &bindings), self)
     }
 
     pub fn alloc_tensors(

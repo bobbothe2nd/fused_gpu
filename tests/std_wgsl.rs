@@ -1,8 +1,7 @@
 extern crate alloc;
 
 use fused_gpu::dispatch::{
-    CompilationOptions, GpuContext,
-    backend::{Graph, LossType, Metadata, kernel::Kernel},
+    CompilationOptions, GpuContext, backend::{Graph, LossType, Metadata, kernel::KernelsChained},
 };
 
 #[test]
@@ -19,7 +18,7 @@ fn mul_add_forward_backward() {
     let x = graph.mul(a, b);
     graph.add(c, x);
 
-    let saved = Kernel::compute_saved_nodes(&graph);
+    let saved = KernelsChained::compute_saved_nodes(&graph);
     let options = CompilationOptions::default();
 
     let ctx = pollster::block_on(GpuContext::new()).unwrap();
@@ -42,11 +41,13 @@ fn mul_add_forward_backward() {
 
     let upload = ctx.upload(&saved_tensors.seed, &[1_f32; 1024]).unwrap();
 
-    ctx.launch_forward(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+
+    ctx.launch_forward(&schedule);
 
     upload.sync();
 
-    ctx.launch_backward(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+    ctx.launch_backward(&schedule);
 
     let mut dst = [0_f32; 1024];
 
@@ -82,7 +83,7 @@ fn matmul_sub_softmax_forward_backward() {
     let s = graph.sub(c, x);
     graph.softmax(s);
 
-    let saved = Kernel::compute_saved_nodes(&graph);
+    let saved = KernelsChained::compute_saved_nodes(&graph);
     let options = CompilationOptions::default();
 
     let ctx = pollster::block_on(GpuContext::new()).unwrap();
@@ -105,11 +106,13 @@ fn matmul_sub_softmax_forward_backward() {
 
     let upload = ctx.upload(&saved_tensors.seed, &[1.0_f32; 1024]).unwrap();
 
-    ctx.launch_forward(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+
+    ctx.launch_forward(&schedule);
 
     upload.sync();
 
-    ctx.launch_backward(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+    ctx.launch_backward(&schedule);
 
     let mut dst = [0_f32; 2048];
 
@@ -149,7 +152,7 @@ fn div_const_softmax_forward_backward() {
     let logits = graph.div(two, x);
     graph.softmax(logits);
 
-    let saved = Kernel::compute_saved_nodes(&graph);
+    let saved = KernelsChained::compute_saved_nodes(&graph);
     let options = CompilationOptions::default();
 
     let ctx = pollster::block_on(GpuContext::new()).unwrap();
@@ -168,11 +171,13 @@ fn div_const_softmax_forward_backward() {
 
     let upload = ctx.upload(&saved_tensors.seed, &[1_f32; 512]).unwrap();
 
-    ctx.launch_forward(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+
+    ctx.launch_forward(&schedule);
 
     upload.sync();
 
-    ctx.launch_backward(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+    ctx.launch_backward(&schedule);
 
     let mut dst = [0_f32; 512];
 
@@ -211,7 +216,7 @@ fn matmul_add_forward_backward() {
     let x = graph.matmul(a, b);
     graph.add(x, c);
 
-    let saved = Kernel::compute_saved_nodes(&graph);
+    let saved = KernelsChained::compute_saved_nodes(&graph);
     let options = CompilationOptions::default();
 
     let ctx = pollster::block_on(GpuContext::new()).unwrap();
@@ -236,11 +241,13 @@ fn matmul_add_forward_backward() {
         .upload(&saved_tensors.seed, &[1_f32; (M * N) as usize])
         .unwrap();
 
-    ctx.launch_forward(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+
+    ctx.launch_forward(&schedule);
 
     upload.sync();
 
-    ctx.launch_backward(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+    ctx.launch_backward(&schedule);
 
     let mut dst = alloc::vec![0_f32; (M * N).max(M * K).max(K * N) as usize];
 
@@ -313,7 +320,7 @@ fn matmul_chain3_forward_backward() {
     let z = graph.matmul(y, d);
     graph.add(z, e);
 
-    let saved = Kernel::compute_saved_nodes(&graph);
+    let saved = KernelsChained::compute_saved_nodes(&graph);
     let options = CompilationOptions::default();
 
     let ctx = pollster::block_on(GpuContext::new()).unwrap();
@@ -340,11 +347,13 @@ fn matmul_chain3_forward_backward() {
         .upload(&saved_tensors.seed, &[1_f32; (H * H) as usize])
         .unwrap();
 
-    ctx.launch_forward(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+
+    ctx.launch_forward(&schedule);
 
     upload.sync();
 
-    ctx.launch_backward(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+    ctx.launch_backward(&schedule);
 
     let max_len = in_tensors.iter().map(|x| x.len()).max().unwrap_or(0) as usize;
     let mut dst = alloc::vec![0.0; max_len];

@@ -17,10 +17,10 @@ mod backward;
 mod loss;
 
 /// Forward, backward, and loss kernel IR.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct KernelGroup {
-    pub(crate) forward: Vec<Dependencies<Kernel>>,
-    pub(crate) backward: Vec<Dependencies<Kernel>>,
+    pub(crate) forward: KernelsChained,
+    pub(crate) backward: KernelsChained,
     pub(crate) loss: Kernel,
 }
 
@@ -165,27 +165,13 @@ impl SaveIndicator {
     }
 }
 
-/// Intermediate representation of a GPU kernel.
-#[derive(Debug, Clone)]
-pub struct Kernel {
-    pub meta: Metadata,
-
+#[derive(Debug)]
+pub struct KernelsChained {
+    pub kernels: Vec<Dependencies<LinkedKernel>>,
     pub params: Vec<Param>,
-
-    pub shared: Vec<SharedAlloc>,
-
-    pub values: Vec<Value>,
-
-    pub ops: Vec<Op>,
-
-    pub block: [u32; 3],
-
-    pub iter_space: Vec<MetaId>,
-
-    pub root: NodeId,
 }
 
-impl Kernel {
+impl KernelsChained {
     #[inline]
     #[must_use]
     pub fn compute_saved_nodes(graph: &Graph) -> Vec<SaveIndicator> {
@@ -234,7 +220,181 @@ impl Kernel {
             loss,
         })
     }
+}
 
+macro_rules! impl_control_flow {
+    ($kernel:ident) => {
+        impl $kernel {
+            pub fn push_if(&mut self, cond: ValueId, content: impl FnOnce(&mut Self)) {
+                self.raw.ops.push(Op::IfBegin { cond });
+                content(self);
+                self.raw.ops.push(Op::EndScope);
+            }
+
+            pub fn push_if_else(
+                &mut self,
+                cond: ValueId,
+                content: impl FnOnce(&mut Self),
+                else_content: impl FnOnce(&mut Self),
+            ) {
+                self.raw.ops.push(Op::IfBegin { cond });
+                content(self);
+                self.raw.ops.push(Op::EndScope);
+                self.raw.ops.push(Op::ElseBegin);
+                else_content(self);
+                self.raw.ops.push(Op::EndScope);
+            }
+
+            pub fn push_for_loop<F: FnOnce(&mut Self) -> R, R>(
+                &mut self,
+                index: ValueId,
+                end: ValueId,
+                step: ValueId,
+                content: F,
+            ) -> R {
+                self.raw.ops.push(Op::ForLoopBegin { index, end, step });
+                let ret = content(self);
+                self.raw.ops.push(Op::EndScope);
+                ret
+            }
+
+            pub fn push_while_loop<F: FnOnce(&mut Self) -> R, R>(&mut self, cond: Op, content: F) -> R {
+                self.raw.ops.push(Op::WhileLoopBegin {
+                    cond: Box::new(cond),
+                });
+                let ret = content(self);
+                self.raw.ops.push(Op::EndScope);
+                ret
+            }
+
+            pub fn push_forever_loop<F: FnOnce(&mut Self) -> R, R>(&mut self, content: F) -> R {
+                self.raw.ops.push(Op::ForeverLoopBegin);
+                let ret = content(self);
+                self.raw.ops.push(Op::EndScope);
+                ret
+            }
+
+            pub fn param_store(&mut self, param: ParamId, index: ValueId, value: ValueId) {
+                self.register_param(param);
+
+                self.raw.ops.push(Op::ParamStore {
+                    param,
+                    index,
+                    value,
+                });
+            }
+
+            pub fn param_accum(&mut self, param: ParamId, index: ValueId, value: ValueId) {
+                self.register_param(param);
+
+                self.raw.ops.push(Op::ParamAccum {
+                    param,
+                    index,
+                    value,
+                });
+            }
+
+            pub fn param_mul(&mut self, param: ParamId, index: ValueId, value: ValueId) {
+                self.register_param(param);
+
+                self.raw.ops.push(Op::ParamMul {
+                    param,
+                    index,
+                    value,
+                });
+            }
+
+            pub fn param_div(&mut self, param: ParamId, index: ValueId, value: ValueId) {
+                self.register_param(param);
+
+                self.raw.ops.push(Op::ParamDiv {
+                    param,
+                    index,
+                    value,
+                });
+            }
+
+            pub fn param_sub(&mut self, param: ParamId, index: ValueId, value: ValueId) {
+                self.register_param(param);
+
+                self.raw.ops.push(Op::ParamSub {
+                    param,
+                    index,
+                    value,
+                });
+            }
+
+            pub fn param_shl(&mut self, param: ParamId, index: ValueId, value: ValueId) {
+                self.register_param(param);
+
+                self.raw.ops.push(Op::ParamShl {
+                    param,
+                    index,
+                    value,
+                });
+            }
+
+            pub fn param_shr(&mut self, param: ParamId, index: ValueId, value: ValueId) {
+                self.register_param(param);
+
+                self.raw.ops.push(Op::ParamShr {
+                    param,
+                    index,
+                    value,
+                });
+            }
+        }
+    };
+}
+
+#[derive(Debug)]
+pub struct Kernel {
+    pub raw: RawKernel,
+    pub params: Vec<Param>,
+}
+
+impl_control_flow!(Kernel);
+
+impl Kernel {
+    pub fn update_param_dtype(&mut self, id: ValueId, dtype: DType) {
+        self.params[id].dtype = dtype;
+    }
+    
+    fn register_param(&mut self, _id: ParamId) {}
+}
+
+#[derive(Debug)]
+pub struct LinkedKernel {
+    pub raw: RawKernel,
+    pub params: Vec<bool>,
+}
+
+impl_control_flow!(LinkedKernel);
+
+impl LinkedKernel {
+    pub fn register_param(&mut self, id: ParamId) {
+        self.params[id] = true;
+    }
+}
+
+#[derive(Debug)]
+pub struct RawKernel {
+    pub meta: Metadata,
+
+    pub shared: Vec<SharedAlloc>,
+
+    pub values: Vec<Value>,
+
+    pub ops: Vec<Op>,
+
+    pub block: [u32; 3],
+
+    pub iter_space: Vec<MetaId>,
+
+    pub root: NodeId,
+}
+
+impl RawKernel {
     pub fn def_var(&mut self, dtype: DType, state: ValueState, init: Option<Op>) -> ValueId {
         let id = self.values.len();
         self.values.push(Value { state, dtype, init });
@@ -303,10 +463,6 @@ impl Kernel {
         self.values[id].init = Some(init);
     }
 
-    pub fn update_param_dtype(&mut self, id: ValueId, dtype: DType) {
-        self.params[id].dtype = dtype;
-    }
-
     pub fn new_shared(&mut self, dtype: DType, size: u32) -> SharedId {
         let id = self.shared.len();
         self.shared.push(SharedAlloc { dtype, size });
@@ -321,117 +477,12 @@ impl Kernel {
         self.ops.push(Op::Return);
     }
 
-    pub fn push_if(&mut self, cond: ValueId, content: impl FnOnce(&mut Self)) {
-        self.ops.push(Op::IfBegin { cond });
-        content(self);
-        self.ops.push(Op::EndScope);
-    }
-
-    pub fn push_if_else(
-        &mut self,
-        cond: ValueId,
-        content: impl FnOnce(&mut Self),
-        else_content: impl FnOnce(&mut Self),
-    ) {
-        self.ops.push(Op::IfBegin { cond });
-        content(self);
-        self.ops.push(Op::EndScope);
-        self.ops.push(Op::ElseBegin);
-        else_content(self);
-        self.ops.push(Op::EndScope);
-    }
-
-    pub fn push_for_loop<F: FnOnce(&mut Self) -> R, R>(
-        &mut self,
-        index: ValueId,
-        end: ValueId,
-        step: ValueId,
-        content: F,
-    ) -> R {
-        self.ops.push(Op::ForLoopBegin { index, end, step });
-        let ret = content(self);
-        self.ops.push(Op::EndScope);
-        ret
-    }
-
-    pub fn push_while_loop<F: FnOnce(&mut Self) -> R, R>(&mut self, cond: Op, content: F) -> R {
-        self.ops.push(Op::WhileLoopBegin {
-            cond: Box::new(cond),
-        });
-        let ret = content(self);
-        self.ops.push(Op::EndScope);
-        ret
-    }
-
-    pub fn push_forever_loop<F: FnOnce(&mut Self) -> R, R>(&mut self, content: F) -> R {
-        self.ops.push(Op::ForeverLoopBegin);
-        let ret = content(self);
-        self.ops.push(Op::EndScope);
-        ret
-    }
-
     pub fn push_continue(&mut self) {
         self.ops.push(Op::Continue);
     }
 
     pub fn push_break(&mut self) {
         self.ops.push(Op::Break);
-    }
-
-    pub fn param_store(&mut self, param: ParamId, index: ValueId, value: ValueId) {
-        self.ops.push(Op::ParamStore {
-            param,
-            index,
-            value,
-        });
-    }
-
-    pub fn param_accum(&mut self, param: ParamId, index: ValueId, value: ValueId) {
-        self.ops.push(Op::ParamAccum {
-            param,
-            index,
-            value,
-        });
-    }
-
-    pub fn param_mul(&mut self, param: ParamId, index: ValueId, value: ValueId) {
-        self.ops.push(Op::ParamMul {
-            param,
-            index,
-            value,
-        });
-    }
-
-    pub fn param_div(&mut self, param: ParamId, index: ValueId, value: ValueId) {
-        self.ops.push(Op::ParamDiv {
-            param,
-            index,
-            value,
-        });
-    }
-
-    pub fn param_sub(&mut self, param: ParamId, index: ValueId, value: ValueId) {
-        self.ops.push(Op::ParamSub {
-            param,
-            index,
-            value,
-        });
-    }
-
-    pub fn param_shl(&mut self, param: ParamId, index: ValueId, value: ValueId) {
-        self.ops.push(Op::ParamShl {
-            param,
-            index,
-            value,
-        });
-    }
-
-    pub fn param_shr(&mut self, param: ParamId, index: ValueId, value: ValueId) {
-        self.ops.push(Op::ParamShr {
-            param,
-            index,
-            value,
-        });
     }
 
     pub fn shared_store(&mut self, mem: SharedId, index: ValueId, value: ValueId) {

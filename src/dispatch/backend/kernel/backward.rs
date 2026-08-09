@@ -2,24 +2,20 @@ use core::cmp::Ordering;
 
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend,
-        backend::{
-            Axis, DType, DispatchOptions, Graph, GraphOp, Metadata, Node, NodeId, Op, Param,
-            ParamId, ParamTy, ValueId, ValueState,
-            kernel::{Dependencies, Kernel, NodeInput, SaveIndicator},
+        CompilationOptions, GpuBackend, backend::{
+            Axis, DType, DispatchOptions, Graph, GraphOp, Metadata, Node, NodeId, Op, Param, ParamId, ParamTy, ValueId, ValueState, kernel::{Dependencies, KernelsChained, LinkedKernel, NodeInput, RawKernel, SaveIndicator},
         },
-    },
-    errors::{Error, ErrorKind},
+    }, errors::{Error, ErrorKind},
 };
 use alloc::{vec, vec::Vec};
 
 #[inline]
-pub fn lower_backward<B: GpuBackend + Clone>(
+pub fn lower_backward<'a, B: GpuBackend + Clone>(
     graph: &Graph<B>,
     meta: Metadata,
     saved: &[SaveIndicator],
     options: &CompilationOptions<B>,
-) -> Result<Vec<Dependencies<Kernel>>, Error> {
+) -> Result<KernelsChained, Error> {
     let tile_size = options.opt.tile_size;
 
     let shared_size = tile_size * tile_size;
@@ -29,11 +25,13 @@ pub fn lower_backward<B: GpuBackend + Clone>(
     params.push(Param {
         dtype: DType::UnsignedInt,
         ty: ParamTy::Uniform,
+        pid: 0,
     });
 
     params.push(Param {
         dtype: DType::Float,
         ty: ParamTy::ReadOnly,
+        pid: 1,
     });
 
     let mut grad_params = vec![None; graph.nodes.len()];
@@ -46,6 +44,7 @@ pub fn lower_backward<B: GpuBackend + Clone>(
             params.push(Param {
                 dtype: DType::Float,
                 ty: ParamTy::ReadWrite,
+                pid,
             });
         }
     }
@@ -60,6 +59,7 @@ pub fn lower_backward<B: GpuBackend + Clone>(
             params.push(Param {
                 dtype: DType::Float,
                 ty: ParamTy::ReadOnly,
+                pid,
             });
         }
     }
@@ -72,11 +72,12 @@ pub fn lower_backward<B: GpuBackend + Clone>(
             params.push(Param {
                 dtype: DType::Float,
                 ty: ParamTy::ReadOnly,
+                pid,
             });
         }
     }
 
-    let mut grad_kernels: Vec<Dependencies<Kernel>> = Vec::new();
+    let mut grad_kernels: Vec<Dependencies<LinkedKernel>> = Vec::new();
     let mut kernels = Vec::new();
 
     for input in graph
@@ -114,23 +115,23 @@ pub fn lower_backward<B: GpuBackend + Clone>(
                     root_node,
                 );
 
-                let upstream = kernel.def_var(
+                let upstream = kernel.raw.def_var(
                     DType::Float,
                     ValueState::Mut,
                     Some(Op::ConstF32 { value: 0.0 }),
                 );
 
-                let tile_size = kernel.def_var(
+                let tile_size = kernel.raw.def_var(
                     DType::UnsignedInt,
                     ValueState::Const,
                     Some(Op::ConstU32 { value: tile_size }),
                 );
-                let local_row = kernel.def_var(
+                let local_row = kernel.raw.def_var(
                     DType::UnsignedInt,
                     ValueState::Immut,
                     Some(Op::LocalId { axis: Axis::Y }),
                 );
-                let local_col = kernel.def_var(
+                let local_col = kernel.raw.def_var(
                     DType::UnsignedInt,
                     ValueState::Immut,
                     Some(Op::LocalId { axis: Axis::X }),
@@ -175,11 +176,11 @@ pub fn lower_backward<B: GpuBackend + Clone>(
                             DispatchOptions::Any => {}
 
                             DispatchOptions::ReqRow => {
-                                kernel.block = [1, shared_size, 1];
+                                kernel.raw.block = [1, shared_size, 1];
                             }
 
                             DispatchOptions::ReqCol => {
-                                kernel.block = [shared_size, 1, 1];
+                                kernel.raw.block = [shared_size, 1, 1];
                             }
                         }
                     }
@@ -195,7 +196,7 @@ pub fn lower_backward<B: GpuBackend + Clone>(
                 }
 
                 for kernel in &mut grad_kernels {
-                    if kernel.val.root < root {
+                    if kernel.val.raw.root < root {
                         kernel.dep.push(root);
                     }
                 }
@@ -212,7 +213,10 @@ pub fn lower_backward<B: GpuBackend + Clone>(
         kernels.append(&mut grad_kernels);
     }
 
-    Ok(kernels)
+    Ok(KernelsChained {
+        kernels,
+        params,
+    })
 }
 
 fn eval_grad<B: GpuBackend + Clone>(
@@ -224,7 +228,7 @@ fn eval_grad<B: GpuBackend + Clone>(
     graph: &Graph<B>,
     node_params: &[Option<ParamId>],
     saved_params: &[Option<ParamId>],
-    kernel: &mut Kernel,
+    kernel: &mut LinkedKernel,
     idx: ValueId,
     base: ValueId,
     local_row: ValueId,
@@ -237,13 +241,15 @@ fn eval_grad<B: GpuBackend + Clone>(
     let node_id = match node_id {
         NodeInput::Node(node_id) => *node_id,
         NodeInput::Raw { param, shape: _ } => {
-            kernel.accum_var(
+            kernel.raw.accum_var(
                 upstream,
                 Op::ParamLoad {
                     param: *param,
                     index: idx,
                 },
             );
+            
+            kernel.register_param(*param);
 
             return Ok(Vec::new());
         }
@@ -256,13 +262,15 @@ fn eval_grad<B: GpuBackend + Clone>(
     let node = &graph.nodes[node_id];
 
     if node.outputs.is_empty() {
-        kernel.accum_var(
+        kernel.raw.accum_var(
             upstream,
             Op::ParamLoad {
                 param: 1,
                 index: idx,
             },
         );
+        
+        kernel.register_param(1);
 
         return Ok(deepest);
     }
@@ -294,7 +302,9 @@ fn eval_grad<B: GpuBackend + Clone>(
             kind: ErrorKind::ParamNotMaterialized,
             ctx: (),
         })?;
-        kernel.accum_var(upstream, Op::ParamLoad { param, index: idx });
+        kernel.raw.accum_var(upstream, Op::ParamLoad { param, index: idx });
+
+        kernel.register_param(param);
 
         return Ok(deepest);
     }
@@ -354,22 +364,26 @@ fn gen_kernel<B: GpuBackend + Clone>(
     block: [u32; 3],
     input: NodeId,
     root_node: &Node<B>,
-) -> (Kernel, ValueId, ValueId) {
-    let mut kernel = Kernel {
-        meta,
-        params,
-        shared: Vec::new(),
-        values: Vec::new(),
-        ops: Vec::new(),
-        block,
-        root: input,
-        iter_space: root_node.shape.clone(),
+) -> (LinkedKernel, ValueId, ValueId) {
+    let mut kernel = LinkedKernel {
+        raw: RawKernel {
+            meta,
+            shared: Vec::new(),
+            values: Vec::new(),
+            ops: Vec::new(),
+            block,
+            root: input,
+            iter_space: root_node.shape.clone(),
+        },
+        params: vec![false; params.len()],
     };
+
+    kernel.register_param(0);
 
     let mut dims = Vec::new();
 
     for &meta_index in &root_node.shape {
-        let dim_val = kernel.def_var(
+        let dim_val = kernel.raw.def_var(
             DType::UnsignedInt,
             ValueState::Immut,
             Some(Op::ReadMeta {
@@ -388,26 +402,26 @@ fn gen_kernel<B: GpuBackend + Clone>(
         dims.swap(m, n);
     }
 
-    let gid = kernel.def_var(
+    let gid = kernel.raw.def_var(
         DType::UnsignedInt,
         ValueState::Mut,
         Some(Op::GlobalId { axis: Axis::X }),
     );
 
-    let mut base = kernel.def_var(
+    let mut base = kernel.raw.def_var(
         DType::UnsignedInt,
         ValueState::Mut,
         Some(Op::ConstU32 { value: 0 }),
     );
 
     let total = dims[0];
-    kernel.update_var_state(total, ValueState::Mut);
+    kernel.raw.update_var_state(total, ValueState::Mut);
 
     if dims.len() > 1 {
-        let gid2 = kernel.def_var(DType::UnsignedInt, ValueState::Mut, None);
+        let gid2 = kernel.raw.def_var(DType::UnsignedInt, ValueState::Mut, None);
 
         for (i, &d) in dims.iter().enumerate().skip(1) {
-            kernel.overwrite_var(
+            kernel.raw.overwrite_var(
                 gid2,
                 Op::GlobalId {
                     axis: (i as u8).try_into().unwrap_or(Axis::Z),
@@ -415,19 +429,19 @@ fn gen_kernel<B: GpuBackend + Clone>(
             );
 
             if i >= 2 {
-                kernel.overwrite_var(gid2, Op::Mul { a: total, b: gid2 });
+                kernel.raw.overwrite_var(gid2, Op::Mul { a: total, b: gid2 });
 
                 if i == 2 {
-                    kernel.update_var_state(base, ValueState::Masked);
+                    kernel.raw.update_var_state(base, ValueState::Masked);
                     base = gid2;
                 }
             } else {
-                kernel.overwrite_var(gid2, Op::Mul { a: d, b: gid2 });
+                kernel.raw.overwrite_var(gid2, Op::Mul { a: d, b: gid2 });
             }
 
-            kernel.accum_var(gid, Op::CopyVar { id: gid2 });
+            kernel.raw.accum_var(gid, Op::CopyVar { id: gid2 });
 
-            kernel.overwrite_var(total, Op::Mul { a: total, b: d });
+            kernel.raw.overwrite_var(total, Op::Mul { a: total, b: d });
         }
     }
 
