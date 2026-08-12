@@ -121,13 +121,10 @@ impl GpuBackend for NopGpuContext {
         _kernel: &Self::Kernel,
         _wg: [u32; 3],
         _bindings: &[&Self::Buffer],
-    ) {}
+    ) {
+    }
 
-    fn dispatch_schedule(
-        &self,
-        _batcher: &mut Self::Batcher<'_>,
-        _schedule: &Self::Schedule<'_>
-    ) {}
+    fn dispatch_schedule(&self, _batcher: &mut Self::Batcher<'_>, _schedule: &Self::Schedule<'_>) {}
 
     fn encode(&self, _state: Self::BatchState) -> Self::SyncSubmissions {}
 
@@ -137,10 +134,15 @@ impl GpuBackend for NopGpuContext {
 
     fn schedule<'a>(
         &self,
-        _kernels: &'a [(kernel::Dependencies<Self::Kernel>, NodeId, &[bool])],
+        _kernels: &'a [kernel::Dependencies<kernel::Redirect<(Self::Kernel, NodeId, &[bool])>>],
         _bindings: &[&'a Self::Buffer],
         _meta: &[u32],
-    ) -> Self::Schedule<'a> {
+    ) -> Result<Self::Schedule<'a>, Error> {
+        Err(Error {
+            msg: "using nop backend",
+            kind: ErrorKind::UnsupportedFeature,
+            ctx: (),
+        })
     }
 
     fn poll(&self) -> super::PollStatus {
@@ -666,6 +668,9 @@ impl PartialOrd for DispatchOptions {
     }
 }
 
+/// A linear operation in an execution graph.
+///
+/// This treats lowering functions as unique identifiers, so don't reuse functions.
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum GraphOp<'a, B: GpuBackend = GpuContext> {
@@ -714,7 +719,8 @@ pub enum GraphOp<'a, B: GpuBackend = GpuContext> {
         ) -> Result<Vec<NodeId>, Error>,
         display: fn(&[Vec<MetaId>]) -> String,
         save: fn(NodeId, &Node<'_, B>, &Graph<'_, B>, &mut [SaveIndicator]),
-        valid_shape: fn(NodeId, &Node<'a, B>, &Graph<'a, B>, &mut Vec<Error<GraphErrorContext<'a, B>>>),
+        valid_shape:
+            fn(NodeId, &Node<'a, B>, &Graph<'a, B>, &mut Vec<Error<GraphErrorContext<'a, B>>>),
         arity: u8,
         need_dims: bool,
         stable_iter: bool,
@@ -730,6 +736,23 @@ impl<B: GpuBackend> Copy for GraphOp<'_, B> {}
 impl<B: GpuBackend> Clone for GraphOp<'_, B> {
     fn clone(&self) -> Self {
         *self
+    }
+}
+
+impl<B: GpuBackend> PartialEq for GraphOp<'_, B> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Input, Self::Input) => true,
+            (Self::ConstF32(a), Self::ConstF32(b)) => a == b,
+            (Self::Custom {
+                lower: a_lower,
+                ..
+            }, Self::Custom {
+                lower: b_lower,
+                ..
+            }) => (*a_lower as usize) == (*b_lower as usize),
+            _ => false,
+        }
     }
 }
 
@@ -942,7 +965,10 @@ fn check_metadata<B: GpuBackend>(
     }
 }
 
-fn check_shapes<'a, B: GpuBackend>(graph: &Graph<'a, B>, errors: &mut Vec<Error<GraphErrorContext<'a, B>>>) {
+fn check_shapes<'a, B: GpuBackend>(
+    graph: &Graph<'a, B>,
+    errors: &mut Vec<Error<GraphErrorContext<'a, B>>>,
+) {
     for (node_id, node) in graph.nodes.iter().enumerate() {
         if node.shape.len() < 2 && !node.op.is_leaf() {
             errors.push(Error {
@@ -1038,6 +1064,15 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
         user_inputs.iter().position(|input| *input == node)
     }
 
+    /// Topologically sorts the nodes in the graph by inputs.
+    ///
+    /// After sorting, it's important to rebuild the outputs ([`Self::rebuild_outputs`]) before
+    /// lowering. Its probably a good idea to sort it before lowering and validate it before
+    /// sorting too.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the graph is structurally broken (e.g. containing loops).
     pub fn topo_sort<'b>(&'b mut self) -> Result<(), Error<GraphErrorContext<'a, B>>> {
         let n = self.nodes.len();
 
@@ -1137,6 +1172,8 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
 
     /// Validates the graph for mathematical correctness given the metadata usesd during lowering.
     ///
+    /// # Errors
+    ///
     /// This function will not panic, but it can stop many panics and bugs in:
     ///
     /// - [`Self::lower`]
@@ -1162,6 +1199,34 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
         }
     }
 
+    #[inline]
+    #[must_use]
+    pub fn compute_saved_nodes(&self) -> Vec<SaveIndicator> {
+        let mut saved = vec![SaveIndicator { flags: 0 }; self.nodes.len()];
+
+        for (node_id, node) in self.nodes.iter().enumerate() {
+            match node.op {
+                GraphOp::Input => {
+                    saved[node_id] |=
+                        SaveIndicator::DEFINED_IN_BACKWARD | SaveIndicator::USED_BY_BACKWARD;
+                }
+
+                GraphOp::Custom { save, .. } => {
+                    save(node_id, node, self, &mut saved);
+                }
+
+                _ => {}
+            }
+        }
+
+        saved
+    }
+
+    /// Lowers an execution graph into kernels.
+    ///
+    /// # Errors
+    ///
+    ///
     pub fn lower(
         &'a self,
         meta: Metadata,

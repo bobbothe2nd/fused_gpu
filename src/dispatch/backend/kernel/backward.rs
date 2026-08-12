@@ -1,5 +1,3 @@
-use core::cmp::Ordering;
-
 use crate::{
     dispatch::{
         CompilationOptions, GpuBackend,
@@ -14,6 +12,7 @@ use crate::{
     errors::{Error, ErrorKind},
 };
 use alloc::{vec, vec::Vec};
+use core::cmp::Ordering;
 
 #[inline]
 pub fn lower_backward<'a, B: GpuBackend>(

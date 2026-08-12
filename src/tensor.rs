@@ -86,7 +86,7 @@ impl<B: GpuBackend> Tensor<B> {
     /// To get the full shape, use [`Tensor::dims`].
     #[inline]
     #[must_use]
-    pub fn rank(&self) -> usize {
+    pub const fn rank(&self) -> usize {
         self.shape.len()
     }
 

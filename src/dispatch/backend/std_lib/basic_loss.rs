@@ -134,13 +134,11 @@ impl LossType {
                 );
 
                 let log_pred =
-                    kernel
-                        .def_var(DType::Float, ValueState::Inline, Some(Op::Log { x: pred }));
+                    kernel.def_var(DType::Float, ValueState::Inline, Some(Op::Log { x: pred }));
 
                 kernel.overwrite_var(loss_val, Op::Neg { x: log_pred });
 
-                kernel
-                    .overwrite_var(grad_val, Op::Sub { a: pred, b: one });
+                kernel.overwrite_var(grad_val, Op::Sub { a: pred, b: one });
 
                 Ok(())
             });

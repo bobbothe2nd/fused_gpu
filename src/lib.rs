@@ -3,6 +3,7 @@
 //! It supports CUDA, ROCM, and WGSL. It will compile anything the feature set describes:
 //!
 //! - `wgsl`: Enable WGSL support
+//! - `std`: Enables the standard library (for `fused_gpu`, not the core crate)
 //!
 //! You can also use custom backends.
 
@@ -14,6 +15,7 @@
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::missing_errors_doc)]
 #![deny(clippy::nursery)]
 #![deny(clippy::all)]
 #![allow(clippy::type_complexity)]

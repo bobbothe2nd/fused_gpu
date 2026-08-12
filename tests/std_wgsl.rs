@@ -2,7 +2,7 @@ extern crate alloc;
 
 use fused_gpu::dispatch::{
     CompilationOptions, GpuContext,
-    backend::{Graph, LossType, Metadata, kernel::KernelsChained},
+    backend::{Graph, LossType, Metadata},
 };
 
 #[test]
@@ -19,7 +19,7 @@ fn mul_add_forward_backward() {
     let x = graph.mul(a, b);
     graph.add(c, x);
 
-    let saved = KernelsChained::compute_saved_nodes(&graph);
+    let saved = graph.compute_saved_nodes();
     let options = CompilationOptions::default();
 
     let ctx = GpuContext::new().unwrap();
@@ -42,10 +42,10 @@ fn mul_add_forward_backward() {
 
     let upload = ctx.upload(&saved_tensors.seed, &[1_f32; 1024]).unwrap();
 
-    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors).unwrap();
 
     let mut state = ctx.prepare_batch();
-    
+
     {
         let mut pass = ctx.start_batch(&mut state);
 
@@ -91,7 +91,7 @@ fn matmul_sub_softmax_forward_backward() {
     let s = graph.sub(c, x);
     graph.softmax(s);
 
-    let saved = KernelsChained::compute_saved_nodes(&graph);
+    let saved = graph.compute_saved_nodes();
     let options = CompilationOptions::default();
 
     let ctx = GpuContext::new().unwrap();
@@ -114,10 +114,10 @@ fn matmul_sub_softmax_forward_backward() {
 
     let upload = ctx.upload(&saved_tensors.seed, &[1.0_f32; 1024]).unwrap();
 
-    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors).unwrap();
 
     let mut state = ctx.prepare_batch();
-    
+
     {
         let mut pass = ctx.start_batch(&mut state);
 
@@ -167,7 +167,7 @@ fn div_const_softmax_forward_backward() {
     let logits = graph.div(two, x);
     graph.softmax(logits);
 
-    let saved = KernelsChained::compute_saved_nodes(&graph);
+    let saved = graph.compute_saved_nodes();
     let options = CompilationOptions::default();
 
     let ctx = GpuContext::new().unwrap();
@@ -186,10 +186,10 @@ fn div_const_softmax_forward_backward() {
 
     let upload = ctx.upload(&saved_tensors.seed, &[1_f32; 512]).unwrap();
 
-    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors).unwrap();
 
     let mut state = ctx.prepare_batch();
-    
+
     {
         let mut pass = ctx.start_batch(&mut state);
 
@@ -238,7 +238,7 @@ fn matmul_add_forward_backward() {
     let x = graph.matmul(a, b);
     graph.add(x, c);
 
-    let saved = KernelsChained::compute_saved_nodes(&graph);
+    let saved = graph.compute_saved_nodes();
     let options = CompilationOptions::default();
 
     let ctx = GpuContext::new().unwrap();
@@ -263,10 +263,10 @@ fn matmul_add_forward_backward() {
         .upload(&saved_tensors.seed, &[1_f32; (M * N) as usize])
         .unwrap();
 
-    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors).unwrap();
 
     let mut state = ctx.prepare_batch();
-    
+
     {
         let mut pass = ctx.start_batch(&mut state);
 
@@ -349,7 +349,7 @@ fn matmul_chain3_forward_backward() {
     let z = graph.matmul(y, d);
     graph.add(z, e);
 
-    let saved = KernelsChained::compute_saved_nodes(&graph);
+    let saved = graph.compute_saved_nodes();
     let options = CompilationOptions::default();
 
     let ctx = GpuContext::new().unwrap();
@@ -376,10 +376,10 @@ fn matmul_chain3_forward_backward() {
         .upload(&saved_tensors.seed, &[1_f32; (H * H) as usize])
         .unwrap();
 
-    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors).unwrap();
 
     let mut state = ctx.prepare_batch();
-    
+
     {
         let mut pass = ctx.start_batch(&mut state);
 
@@ -472,7 +472,7 @@ fn matmul_sub_forward_backward() {
 
     graph.sub(x, y);
 
-    let saved = KernelsChained::compute_saved_nodes(&graph);
+    let saved = graph.compute_saved_nodes();
     let options = CompilationOptions::default();
 
     let ctx = GpuContext::new().unwrap();
@@ -497,14 +497,10 @@ fn matmul_sub_forward_backward() {
     let saved_tensors = ctx.alloc_tensors(&graph, &saved, &meta_binding);
 
     let upload = ctx
-        .upload(
-            &saved_tensors.seed,
-            &[1_f32; (M * N) as usize],
-        )
+        .upload(&saved_tensors.seed, &[1_f32; (M * N) as usize])
         .unwrap();
 
-    let schedule =
-        ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors).unwrap();
 
     let mut state = ctx.prepare_batch();
 

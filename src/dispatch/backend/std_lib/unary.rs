@@ -232,14 +232,17 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
                     |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId| kernel
                         .raw
                         .overwrite_var(out, Op::Log { x: inp }),
-                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId, upstream: ValueId| {
+                    |kernel: &mut LinkedKernel<'a, B>,
+                     out: ValueId,
+                     inp: ValueId,
+                     upstream: ValueId| {
                         kernel.raw.accum_var(
                             out,
                             Op::Div {
                                 a: upstream,
                                 b: inp,
                             },
-                        )
+                        );
                     },
                 ),
                 display: |inputs| format!("log2({:?})", inputs[0]),
@@ -266,7 +269,10 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
                     |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId| kernel
                         .raw
                         .overwrite_var(out, Op::Tanh { x: inp }),
-                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId, upstream: ValueId| {
+                    |kernel: &mut LinkedKernel<'a, B>,
+                     out: ValueId,
+                     inp: ValueId,
+                     upstream: ValueId| {
                         let one = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
@@ -352,7 +358,10 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
                             },
                         );
                     },
-                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId, upstream: ValueId| {
+                    |kernel: &mut LinkedKernel<'a, B>,
+                     out: ValueId,
+                     inp: ValueId,
+                     upstream: ValueId| {
                         let zero = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
@@ -423,7 +432,10 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
 
                         kernel.raw.overwrite_var(out, Op::Max { a: inp, b: zero });
                     },
-                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId, upstream: ValueId| {
+                    |kernel: &mut LinkedKernel<'a, B>,
+                     out: ValueId,
+                     inp: ValueId,
+                     upstream: ValueId| {
                         let zero = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
@@ -553,7 +565,10 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
 
                         tanh_u
                     },
-                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId, upstream: ValueId| {
+                    |kernel: &mut LinkedKernel<'a, B>,
+                     out: ValueId,
+                     inp: ValueId,
+                     upstream: ValueId| {
                         let half = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
@@ -704,14 +719,17 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
                     |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId| kernel
                         .raw
                         .overwrite_var(out, Op::Exp { x: inp }),
-                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId, upstream: ValueId| {
+                    |kernel: &mut LinkedKernel<'a, B>,
+                     out: ValueId,
+                     inp: ValueId,
+                     upstream: ValueId| {
                         kernel.raw.accum_var(
                             out,
                             Op::Mul {
                                 a: upstream,
                                 b: inp,
                             },
-                        )
+                        );
                     },
                 ),
                 display: |inputs| format!("e^{:?}", inputs[0]),
@@ -738,7 +756,10 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
                     |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId| kernel
                         .raw
                         .overwrite_var(out, Op::Abs { x: inp }),
-                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId, upstream: ValueId| {
+                    |kernel: &mut LinkedKernel<'a, B>,
+                     out: ValueId,
+                     inp: ValueId,
+                     upstream: ValueId| {
                         let zero = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
@@ -801,7 +822,10 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
                     |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId| kernel
                         .raw
                         .overwrite_var(out, Op::Neg { x: inp }),
-                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, _: ValueId, upstream: ValueId| kernel
+                    |kernel: &mut LinkedKernel<'a, B>,
+                     out: ValueId,
+                     _: ValueId,
+                     upstream: ValueId| kernel
                         .raw
                         .accum_var(out, Op::Neg { x: upstream }),
                 ),

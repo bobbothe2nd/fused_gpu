@@ -1,8 +1,14 @@
 //! Safe error handling for all possibilities.
 
+use crate::dispatch::{
+    GpuBackend,
+    backend::{GpuContext, GraphOp, MetaId, NodeId},
+};
 use alloc::vec::Vec;
-use core::{fmt::{Debug, Display, Formatter, Result}, error::Error as CoreError};
-use crate::dispatch::{backend::{GpuContext, GraphOp, MetaId, NodeId}, GpuBackend};
+use core::{
+    error::Error as CoreError,
+    fmt::{Debug, Display, Formatter, Result},
+};
 
 #[cfg(feature = "telemetry")]
 use gpu_telemetry::errors::{self, ErrorKind as TelemetryErrorKind};
@@ -84,6 +90,7 @@ pub enum ErrorKind {
     InvalidArgument,
     ComputeGraphError,
     FailedBufferCopy,
+    UnresolvedRedirection,
 
     SyncError,
     InvalidInterval,
@@ -117,6 +124,7 @@ impl Display for ErrorKind {
             Self::InvalidInterval => write!(f, "invalid interval"),
             Self::SyncError => write!(f, "synchronization error"),
             Self::WaitFailed => write!(f, "wait failed"),
+            Self::UnresolvedRedirection => write!(f, "unresolved redirection"),
         }
     }
 }

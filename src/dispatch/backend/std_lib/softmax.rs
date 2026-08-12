@@ -582,7 +582,7 @@ pub fn lower_softmax_recursive<'a, B: GpuBackend>(
                 kernel
                     .raw
                     .overwrite_var(stride, Op::Shr { a: stride, b: one });
-                
+
                 Ok(())
             })?;
 

@@ -1,10 +1,9 @@
-use std::time::{Duration, Instant};
-
 use fused_gpu::dispatch::{
     CompilationOptions, GpuContext, Schedule,
-    backend::{Graph, LossType, Metadata, kernel::KernelsChained},
+    backend::{Graph, LossType, Metadata},
 };
 use gpu_telemetry::monitor::{GpuMonitor, telemetry::Telemetry};
+use std::time::{Duration, Instant};
 
 fn matmul_chain3_forward_backward() {
     const M: u32 = 16;
@@ -37,7 +36,7 @@ fn matmul_chain3_forward_backward() {
     let z = graph.matmul(y, d);
     graph.add(z, e);
 
-    let saved = KernelsChained::compute_saved_nodes(&graph);
+    let saved = graph.compute_saved_nodes();
     let options = CompilationOptions::default();
 
     let compile_start = Instant::now();
@@ -76,7 +75,7 @@ fn matmul_chain3_forward_backward() {
 
     println!("TENSOR INIT TIME: {tensor_elapsed:?} elapsed");
 
-    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors).unwrap();
 
     let monitor: GpuMonitor<Telemetry> = GpuMonitor::start(Duration::from_millis(3)).unwrap();
 
@@ -88,11 +87,7 @@ fn matmul_chain3_forward_backward() {
         println!("SAMPLE {i}:");
 
         for heap in &sample.heaps {
-            println!(" {} HEAP:", if heap.dev_local {
-                "LOCAL"
-            } else {
-                "SHARED"
-            });
+            println!(" {} HEAP:", if heap.dev_local { "LOCAL" } else { "SHARED" });
 
             if let Some(size) = heap.size {
                 println!("  size: {size},");

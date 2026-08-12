@@ -45,7 +45,7 @@ fn valid_binary<'a, B: GpuBackend>(
             ctx: GraphErrorContext::CannotInferShape {
                 node: node_id,
                 all_hand_sides: vec![a_shape.clone(), b_shape.clone()],
-                op: node.op.clone(),
+                op: node.op,
             },
         });
     }
@@ -57,7 +57,7 @@ fn valid_binary<'a, B: GpuBackend>(
             ctx: GraphErrorContext::ShapeMismatch {
                 node: node_id,
                 all_hand_sides: vec![a_shape.clone(), b_shape.clone()],
-                op: node.op.clone(),
+                op: node.op,
             },
         });
     }
@@ -99,24 +99,24 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
                     bool,
                     &CompilationOptions<B>,
                 ) -> Result<Vec<NodeId>, Error>,
-                root: NodeId,
-                input: NodeId,
-                resolved: &mut Vec<NodeId>,
-                backwardness: Option<u8>,
-                node_id: NodeId,
-                graph: &'a Self,
-                out: ValueId,
-                node_params: &[Option<ParamId>],
-                saved_params: &[Option<ParamId>],
-                kernel: &mut LinkedKernel<'a, B>,
-                base: ValueId,
-                idx: ValueId,
-                local_row: ValueId,
-                local_col: ValueId,
-                shared_size: u32,
-                tile_size: ValueId,
-                stable_iteration_space: bool,
-                options: &CompilationOptions<B>| {
+                        root: NodeId,
+                        input: NodeId,
+                        resolved: &mut Vec<NodeId>,
+                        backwardness: Option<u8>,
+                        node_id: NodeId,
+                        graph: &'a Self,
+                        out: ValueId,
+                        node_params: &[Option<ParamId>],
+                        saved_params: &[Option<ParamId>],
+                        kernel: &mut LinkedKernel<'a, B>,
+                        base: ValueId,
+                        idx: ValueId,
+                        local_row: ValueId,
+                        local_col: ValueId,
+                        shared_size: u32,
+                        tile_size: ValueId,
+                        stable_iteration_space: bool,
+                        options: &CompilationOptions<B>| {
                     let mut deepest = Vec::new();
 
                     match backwardness {
@@ -249,24 +249,24 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
                     bool,
                     &CompilationOptions<B>,
                 ) -> Result<Vec<NodeId>, Error>,
-                root: NodeId,
-                input: NodeId,
-                resolved: &mut Vec<NodeId>,
-                backwardness: Option<u8>,
-                node_id: NodeId,
-                graph: &'a Self,
-                out: ValueId,
-                node_params: &[Option<ParamId>],
-                saved_params: &[Option<ParamId>],
-                kernel: &mut LinkedKernel<'a, B>,
-                base: ValueId,
-                idx: ValueId,
-                local_row: ValueId,
-                local_col: ValueId,
-                shared_size: u32,
-                tile_size: ValueId,
-                stable_iteration_space: bool,
-                options: &CompilationOptions<B>| {
+                        root: NodeId,
+                        input: NodeId,
+                        resolved: &mut Vec<NodeId>,
+                        backwardness: Option<u8>,
+                        node_id: NodeId,
+                        graph: &'a Self,
+                        out: ValueId,
+                        node_params: &[Option<ParamId>],
+                        saved_params: &[Option<ParamId>],
+                        kernel: &mut LinkedKernel<'a, B>,
+                        base: ValueId,
+                        idx: ValueId,
+                        local_row: ValueId,
+                        local_col: ValueId,
+                        shared_size: u32,
+                        tile_size: ValueId,
+                        stable_iteration_space: bool,
+                        options: &CompilationOptions<B>| {
                     let mut deepest = Vec::new();
 
                     match backwardness {
@@ -447,24 +447,24 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
                     bool,
                     &CompilationOptions<B>,
                 ) -> Result<Vec<NodeId>, Error>,
-                root: NodeId,
-                input: NodeId,
-                resolved: &mut Vec<NodeId>,
-                backwardness: Option<u8>,
-                node_id: NodeId,
-                graph: &'a Self,
-                out: ValueId,
-                node_params: &[Option<ParamId>],
-                saved_params: &[Option<ParamId>],
-                kernel: &mut LinkedKernel<'a, B>,
-                base: ValueId,
-                idx: ValueId,
-                local_row: ValueId,
-                local_col: ValueId,
-                shared_size: u32,
-                tile_size: ValueId,
-                stable_iteration_space: bool,
-                options: &CompilationOptions<B>| {
+                        root: NodeId,
+                        input: NodeId,
+                        resolved: &mut Vec<NodeId>,
+                        backwardness: Option<u8>,
+                        node_id: NodeId,
+                        graph: &'a Self,
+                        out: ValueId,
+                        node_params: &[Option<ParamId>],
+                        saved_params: &[Option<ParamId>],
+                        kernel: &mut LinkedKernel<'a, B>,
+                        base: ValueId,
+                        idx: ValueId,
+                        local_row: ValueId,
+                        local_col: ValueId,
+                        shared_size: u32,
+                        tile_size: ValueId,
+                        stable_iteration_space: bool,
+                        options: &CompilationOptions<B>| {
                     let mut deepest = Vec::new();
 
                     match backwardness {
@@ -629,24 +629,24 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
                     bool,
                     &CompilationOptions<B>,
                 ) -> Result<Vec<NodeId>, Error>,
-                root: NodeId,
-                input: NodeId,
-                resolved: &mut Vec<NodeId>,
-                backwardness: Option<u8>,
-                node_id: NodeId,
-                graph: &'a Self,
-                out: ValueId,
-                node_params: &[Option<ParamId>],
-                saved_params: &[Option<ParamId>],
-                kernel: &mut LinkedKernel<'a, B>,
-                base: ValueId,
-                idx: ValueId,
-                local_row: ValueId,
-                local_col: ValueId,
-                shared_size: u32,
-                tile_size: ValueId,
-                stable_iteration_space: bool,
-                options: &CompilationOptions<B>| {
+                        root: NodeId,
+                        input: NodeId,
+                        resolved: &mut Vec<NodeId>,
+                        backwardness: Option<u8>,
+                        node_id: NodeId,
+                        graph: &'a Self,
+                        out: ValueId,
+                        node_params: &[Option<ParamId>],
+                        saved_params: &[Option<ParamId>],
+                        kernel: &mut LinkedKernel<'a, B>,
+                        base: ValueId,
+                        idx: ValueId,
+                        local_row: ValueId,
+                        local_col: ValueId,
+                        shared_size: u32,
+                        tile_size: ValueId,
+                        stable_iteration_space: bool,
+                        options: &CompilationOptions<B>| {
                     let mut deepest = Vec::new();
 
                     match backwardness {
@@ -844,7 +844,11 @@ fn get_shape<B: GpuBackend>(a: NodeId, b: NodeId, graph: &Graph<B>) -> Vec<MetaI
     }
 }
 
-fn read_saved<B: GpuBackend>(kernel: &mut LinkedKernel<'_, B>, index: ValueId, param: Option<ParamId>) -> ValueId {
+fn read_saved<B: GpuBackend>(
+    kernel: &mut LinkedKernel<'_, B>,
+    index: ValueId,
+    param: Option<ParamId>,
+) -> ValueId {
     if let Some(pid) = param {
         kernel.register_param(pid);
 

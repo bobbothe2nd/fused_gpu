@@ -124,26 +124,17 @@ pub fn lower_matmul_recursive<'a, B: GpuBackend>(
     let m = kernel.raw.def_var(
         DType::UnsignedInt,
         ValueState::Immut,
-        Some(Op::ReadMeta {
-            param: 0,
-            field: m,
-        }),
+        Some(Op::ReadMeta { param: 0, field: m }),
     );
     let n = kernel.raw.def_var(
         DType::UnsignedInt,
         ValueState::Immut,
-        Some(Op::ReadMeta {
-            param: 0,
-            field: n,
-        }),
+        Some(Op::ReadMeta { param: 0, field: n }),
     );
     let k = kernel.raw.def_var(
         DType::UnsignedInt,
         ValueState::Immut,
-        Some(Op::ReadMeta {
-            param: 0,
-            field: k,
-        }),
+        Some(Op::ReadMeta { param: 0, field: k }),
     );
 
     if backwardness.is_none() {
@@ -486,7 +477,7 @@ pub fn forward_matmul<'a, B: GpuBackend>(
     Ok(deepest)
 }
 
-impl<'a, B: GpuBackend> Graph<'a, B> {
+impl<B: GpuBackend> Graph<'_, B> {
     pub fn matmul(&mut self, a: NodeId, b: NodeId) -> NodeId {
         fn save<B: GpuBackend>(
             node_id: NodeId,

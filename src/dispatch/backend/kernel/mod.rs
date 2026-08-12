@@ -1,9 +1,12 @@
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend, backend::{
-            DType, GpuContext, Graph, GraphOp, MetaId, Metadata, NodeId, Op, Param, ParamId, SharedAlloc, SharedId, Value, ValueId, ValueState,
+        CompilationOptions, GpuBackend,
+        backend::{
+            DType, GpuContext, Graph, GraphOp, MetaId, Metadata, NodeId, Op, Param, ParamId,
+            SharedAlloc, SharedId, Value, ValueId, ValueState,
         },
-    }, errors::{Error, ErrorKind, GraphErrorContext},
+    },
+    errors::{Error, ErrorKind, GraphErrorContext},
 };
 use alloc::{boxed::Box, vec, vec::Vec};
 
@@ -16,8 +19,8 @@ mod loss;
 /// Forward, backward, and loss kernel IR.
 #[derive(Debug)]
 pub struct KernelGroup<'a, B: GpuBackend = GpuContext> {
-    pub(crate) forward: KernelsChained<'a, B>,
-    pub(crate) backward: KernelsChained<'a, B>,
+    pub(crate) forward: KernelsRedirected<'a, B>,
+    pub(crate) backward: KernelsRedirected<'a, B>,
     pub(crate) loss: Kernel,
 }
 
@@ -27,7 +30,9 @@ pub struct Dependencies<T> {
     pub(crate) dep: Vec<usize>,
 }
 
-pub fn topo_sort<'a, B: GpuBackend, T: Clone>(nodes: &'a mut [Dependencies<T>]) -> Result<(), Error<GraphErrorContext<'a, B>>> {
+pub fn topo_sort<B: GpuBackend, T: Clone>(
+    nodes: &mut [Dependencies<T>],
+) -> Result<(), Error<GraphErrorContext<'_, B>>> {
     let n = nodes.len();
 
     let mut in_degree = vec![0_usize; n];
@@ -110,7 +115,7 @@ pub fn topo_sort<'a, B: GpuBackend, T: Clone>(nodes: &'a mut [Dependencies<T>]) 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SaveIndicator {
-    flags: u8,
+    pub(crate) flags: u8,
 }
 
 impl core::ops::BitOr for SaveIndicator {
@@ -168,32 +173,14 @@ pub struct KernelsChained<'a, B: GpuBackend = GpuContext> {
     pub params: Vec<Param>,
 }
 
+#[derive(Debug)]
+pub struct KernelsRedirected<'a, B: GpuBackend = GpuContext> {
+    pub kernels: Vec<Dependencies<Redirect<LinkedKernel<'a, B>>>>,
+    pub params: Vec<Param>,
+}
+
 impl<'a> KernelsChained<'a> {
-    #[inline]
-    #[must_use]
-    pub fn compute_saved_nodes(graph: &Graph) -> Vec<SaveIndicator> {
-        let mut saved = vec![SaveIndicator { flags: 0 }; graph.nodes.len()];
-
-        for (node_id, node) in graph.nodes.iter().enumerate() {
-            match node.op {
-                GraphOp::Input => {
-                    saved[node_id] |=
-                        SaveIndicator::DEFINED_IN_BACKWARD | SaveIndicator::USED_BY_BACKWARD;
-                }
-
-                GraphOp::Custom { save, .. } => {
-                    save(node_id, node, graph, &mut saved);
-                }
-
-                _ => {}
-            }
-        }
-
-        saved
-    }
-
-    /// Lowers an execution graph into kernels.
-    pub fn lower<B: GpuBackend>(
+    pub(crate) fn lower<B: GpuBackend>(
         graph: &'a Graph<'a, B>,
         meta: Metadata,
         saved: &[SaveIndicator],
@@ -211,11 +198,55 @@ impl<'a> KernelsChained<'a> {
         let backward = backward::lower_backward(graph, meta, saved, options)?;
         let loss = loss::lower_loss(graph, meta);
 
+        let forward = eliminate_kernels(forward);
+        let backward = eliminate_kernels(backward);
+
         Ok(KernelGroup {
             forward,
             backward,
             loss,
         })
+    }
+}
+
+#[derive(Debug)]
+pub enum Redirect<T> {
+    Unmasked(T),
+    Redirected(usize),
+}
+
+fn eliminate_kernels<'a, B: GpuBackend>(kernels: KernelsChained<'a, B>) -> KernelsRedirected<'a, B> {
+    let mut kernels_optimized: Vec<Dependencies<Redirect<LinkedKernel<'a, B>>>> = Vec::new();
+
+    for kernel in kernels.kernels {
+        let mut unique_id = usize::MAX;
+
+        for (idx, resolved_kernel) in kernels_optimized.iter().enumerate() {
+            if let Redirect::Unmasked(resolved_kernel) = &resolved_kernel.val 
+                && kernel.val.ops == resolved_kernel.ops
+                && kernel.val.meta == resolved_kernel.meta
+                && kernel.val.params == resolved_kernel.params
+            {
+                unique_id = idx;
+            }
+        }
+
+        if unique_id == usize::MAX {
+            kernels_optimized.push(Dependencies {
+                val: Redirect::Unmasked(kernel.val),
+                dep: kernel.dep,
+            });
+        } else {
+            kernels_optimized.push(Dependencies {
+                val: Redirect::Redirected(unique_id),
+                dep: kernel.dep,
+            });
+        }
+    }
+
+    KernelsRedirected {
+        kernels: kernels_optimized,
+        params: kernels.params,
     }
 }
 
@@ -249,7 +280,11 @@ pub struct LinkedKernel<'a, B: GpuBackend = GpuContext> {
 }
 
 impl<B: GpuBackend> LinkedKernel<'_, B> {
-    pub fn push_if<F: FnOnce(&mut Self) -> Result<R, Error>, R>(&mut self, cond: ValueId, content: F) -> Result<R, Error> {
+    pub fn push_if<F: FnOnce(&mut Self) -> Result<R, Error>, R>(
+        &mut self,
+        cond: ValueId,
+        content: F,
+    ) -> Result<R, Error> {
         self.raw.ops.push(Op::IfBegin { cond });
         let ret = content(self);
         self.raw.ops.push(Op::EndScope);
@@ -297,7 +332,10 @@ impl<B: GpuBackend> LinkedKernel<'_, B> {
         ret
     }
 
-    pub fn push_forever_loop<F: FnOnce(&mut Self) -> Result<R, Error>, R>(&mut self, content: F) -> Result<R, Error> {
+    pub fn push_forever_loop<F: FnOnce(&mut Self) -> Result<R, Error>, R>(
+        &mut self,
+        content: F,
+    ) -> Result<R, Error> {
         self.raw.ops.push(Op::ForeverLoopBegin);
         let ret = content(self);
         self.raw.ops.push(Op::EndScope);
@@ -411,7 +449,11 @@ pub struct RawKernel {
 }
 
 impl RawKernel {
-    pub fn push_if<F: FnOnce(&mut Self) -> Result<R, Error>, R>(&mut self, cond: ValueId, content: F) -> Result<R, Error> {
+    pub fn push_if<F: FnOnce(&mut Self) -> Result<R, Error>, R>(
+        &mut self,
+        cond: ValueId,
+        content: F,
+    ) -> Result<R, Error> {
         self.ops.push(Op::IfBegin { cond });
         let ret = content(self);
         self.ops.push(Op::EndScope);
@@ -459,7 +501,10 @@ impl RawKernel {
         ret
     }
 
-    pub fn push_forever_loop<F: FnOnce(&mut Self) -> Result<R, Error>, R>(&mut self, content: F) -> Result<R, Error> {
+    pub fn push_forever_loop<F: FnOnce(&mut Self) -> Result<R, Error>, R>(
+        &mut self,
+        content: F,
+    ) -> Result<R, Error> {
         self.ops.push(Op::ForeverLoopBegin);
         let ret = content(self);
         self.ops.push(Op::EndScope);

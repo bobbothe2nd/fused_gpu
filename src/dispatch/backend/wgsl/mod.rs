@@ -1,20 +1,26 @@
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend, GpuBufferBackend, GpuKernelBackend, PollStatus,
-        TargetCompilationOptions,
-        backend::{
-            Axis, DType, MetaId, NodeId, Op, Param, ParamTy, ValueId, ValueState,
-            kernel::{Dependencies, RawKernel},
+        CompilationOptions, GpuBackend, GpuBufferBackend, GpuKernelBackend, PollStatus, TargetCompilationOptions, backend::{
+            Axis, DType, MetaId, NodeId, Op, Param, ParamTy, ValueId, ValueState, kernel::{Dependencies, RawKernel, Redirect},
         },
-    },
-    errors::{Error, ErrorKind},
-    tensor::{build_dims, calc_grid},
+    }, errors::{Error, ErrorKind}, tensor::{build_dims, calc_grid},
 };
 use alloc::{string::String, vec::Vec};
 use briny::raw::cast::cast_slice;
 use core::{fmt::Write, num::NonZeroU64};
 use wgpu::{
-    BackendOptions, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, CommandBuffer, CommandEncoder, CommandEncoderDescriptor, ComputePass, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Device, DeviceDescriptor, Dx12BackendOptions, Dx12Compiler, Dx12SwapchainKind, Dx12UseFrameLatencyWaitableObject, ExperimentalFeatures, Features, ForceShaderModelToken, GlBackendOptions, GlDebugFns, GlFenceBehavior, Gles3MinorVersion, Instance, InstanceDescriptor, InstanceFlags, Limits, MemoryBudgetThresholds, MemoryHints, NoopBackendOptions, PipelineCompilationOptions, PipelineLayout, PipelineLayoutDescriptor, PollType, PowerPreference, Queue, RequestAdapterError, RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource, ShaderStages, SubmissionIndex, Trace, util::{BufferInitDescriptor, DeviceExt},
+    BackendOptions, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry,
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType,
+    BufferDescriptor, BufferUsages, CommandBuffer, CommandEncoder, CommandEncoderDescriptor,
+    ComputePass, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Device,
+    DeviceDescriptor, Dx12BackendOptions, Dx12Compiler, Dx12SwapchainKind,
+    Dx12UseFrameLatencyWaitableObject, ExperimentalFeatures, Features, ForceShaderModelToken,
+    GlBackendOptions, GlDebugFns, GlFenceBehavior, Gles3MinorVersion, Instance, InstanceDescriptor,
+    InstanceFlags, Limits, MemoryBudgetThresholds, MemoryHints, NoopBackendOptions,
+    PipelineCompilationOptions, PipelineLayout, PipelineLayoutDescriptor, PollType,
+    PowerPreference, Queue, RequestAdapterError, RequestAdapterOptions, ShaderModuleDescriptor,
+    ShaderSource, ShaderStages, SubmissionIndex, Trace,
+    util::{BufferInitDescriptor, DeviceExt},
 };
 
 /// WGPU context for device and queue.
@@ -314,26 +320,46 @@ impl GpuBackend for GpuContext {
 
     fn schedule<'a>(
         &self,
-        kernels: &'a [(Dependencies<Self::Kernel>, NodeId, &[bool])],
+        kernels: &'a [Dependencies<Redirect<(Self::Kernel, NodeId, &[bool])>>],
         bindings: &[&'a Self::Buffer],
         meta: &[u32],
-    ) -> Self::Schedule<'a> {
+    ) -> Result<Self::Schedule<'a>, Error> {
         let mut resolved = Vec::new();
         let mut tmp_res = Vec::new();
 
         let mut scheduled_kernels = Vec::new();
 
         while resolved.len() < kernels.len() {
-            for (kernel, idx, params) in kernels {
+            for kernel in kernels {
+                let dep = &kernel.dep;
+
+                let kernel = match &kernel.val {
+                    Redirect::Unmasked(kernel_data) => kernel_data,
+                    Redirect::Redirected(idx) => {
+                        let redirected = match &kernels[*idx].val {
+                            Redirect::Unmasked(kernel) => kernel,
+                            Redirect::Redirected(_) => return Err(Error {
+                                msg: "double redirection or loop encountered in kernel resolution",
+                                kind: ErrorKind::UnresolvedRedirection,
+                                ctx: (),
+                            }),
+                        };
+
+                        redirected
+                    },
+                };
+
+                let (kernel, idx, params) = kernel;
+
                 if resolved.contains(idx) {
                     continue;
                 }
 
-                if kernel.dep.iter().all(|x| resolved.contains(x)) {
+                if dep.iter().all(|x| resolved.contains(x)) {
                     tmp_res.push(*idx);
 
-                    let iter_space = build_dims(kernel.val.iteration_space(), meta);
-                    let grid = calc_grid(&iter_space, *kernel.val.block());
+                    let iter_space = build_dims(kernel.iteration_space(), meta);
+                    let grid = calc_grid(&iter_space, *kernel.block());
 
                     let kernel_bindings = bindings
                         .iter()
@@ -352,7 +378,7 @@ impl GpuBackend for GpuContext {
                         })
                         .collect::<Vec<_>>();
 
-                    let kernel = &kernel.val.kernel;
+                    let kernel = &kernel.kernel;
 
                     let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
                         layout: &kernel.get_bind_group_layout(0),
@@ -367,14 +393,13 @@ impl GpuBackend for GpuContext {
             resolved.append(&mut tmp_res);
         }
 
-        Schedule {
+        Ok(Schedule {
             kernels: scheduled_kernels,
-        }
+        })
     }
 
     fn prepare_batch(&self) -> Self::BatchState {
-        self
-            .device
+        self.device
             .create_command_encoder(&CommandEncoderDescriptor {
                 label: Some("encoder"),
             })
