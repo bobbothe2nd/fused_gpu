@@ -3,8 +3,13 @@ use core::{cmp::Ordering, fmt::Debug};
 
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend, GpuBufferBackend, GpuKernelBackend, TargetCompilationOptions, backend::kernel::{Kernel, KernelGroup, KernelsChained, LinkedKernel, NodeInput, RawKernel, SaveIndicator},
-    }, errors::{Error, ErrorKind, GraphErrorContext},
+        CompilationOptions, GpuBackend, GpuBufferBackend, GpuKernelBackend,
+        TargetCompilationOptions,
+        backend::kernel::{
+            Kernel, KernelGroup, KernelsChained, LinkedKernel, NodeInput, RawKernel, SaveIndicator,
+        },
+    },
+    errors::{Error, ErrorKind, GraphErrorContext},
 };
 
 #[cfg(feature = "standard_ops")]
@@ -113,19 +118,18 @@ impl GpuBackend for NopGpuContext {
         _kernel: &Self::Kernel,
         _wg: [u32; 3],
         _bindings: &[&Self::Buffer],
-    ) -> Self::SyncSubmissions {}
+    ) -> Self::SyncSubmissions {
+    }
 
-    fn launch_schedule(
-        &self,
-        _schedule: &Self::Schedule<'_>,
-    ) {}
+    fn launch_schedule(&self, _schedule: &Self::Schedule<'_>) {}
 
     fn schedule<'a>(
         &self,
         _kernels: &'a [(kernel::Dependencies<Self::Kernel>, NodeId, &[bool])],
         _bindings: &[&'a Self::Buffer],
         _meta: &[u32],
-    ) -> Self::Schedule<'a> {}
+    ) -> Self::Schedule<'a> {
+    }
 
     fn poll(&self) -> super::PollStatus {
         super::PollStatus::Failed
@@ -136,6 +140,18 @@ impl GpuBackend for NopGpuContext {
     fn submit(&self, _submission: Self::SyncSubmissions) -> Self::SubmissionIndex {}
 
     fn upload(&self, _buffer: &Self::Buffer, _data: &[u8]) -> Result<Self::SubmissionIndex, Error> {
+        Err(Error {
+            msg: "using nop backend",
+            kind: ErrorKind::UnsupportedFeature,
+            ctx: (),
+        })
+    }
+
+    fn pipe(
+        &self,
+        _src: &Self::Buffer,
+        _dst: &Self::Buffer,
+    ) -> Result<Self::SubmissionIndex, Error> {
         Err(Error {
             msg: "using nop backend",
             kind: ErrorKind::UnsupportedFeature,
@@ -517,12 +533,23 @@ pub enum Op {
     Return,
 }
 
-#[derive(Debug, Clone)]
-pub struct Node<B: GpuBackend + Clone = GpuContext> {
+#[derive(Debug)]
+pub struct Node<B: GpuBackend = GpuContext> {
     pub op: GraphOp<B>,
     pub inputs: Vec<NodeId>,
     pub outputs: Vec<NodeId>,
     pub shape: Vec<MetaId>,
+}
+
+impl<B: GpuBackend> Clone for Node<B> {
+    fn clone(&self) -> Self {
+        Self {
+            op: self.op,
+            inputs: self.inputs.clone(),
+            outputs: self.outputs.clone(),
+            shape: self.shape.clone(),
+        }
+    }
 }
 
 #[non_exhaustive]
@@ -628,8 +655,8 @@ impl PartialOrd for DispatchOptions {
 }
 
 #[non_exhaustive]
-#[derive(Debug, Clone)]
-pub enum GraphOp<B: GpuBackend + Clone = GpuContext> {
+#[derive(Debug)]
+pub enum GraphOp<B: GpuBackend = GpuContext> {
     Input,
     ConstF32(f32),
 
@@ -686,7 +713,15 @@ pub enum GraphOp<B: GpuBackend + Clone = GpuContext> {
     },
 }
 
-impl<B: GpuBackend + Clone> GraphOp<B> {
+impl<B: GpuBackend> Copy for GraphOp<B> {}
+
+impl<B: GpuBackend> Clone for GraphOp<B> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<B: GpuBackend> GraphOp<B> {
     #[inline]
     #[must_use]
     pub const fn is_elementwise(&self) -> bool {
@@ -798,12 +833,12 @@ impl<B: GpuBackend + Clone> GraphOp<B> {
 }
 
 #[inline]
-fn check_acrylicity<B: GpuBackend + Clone>(
+fn check_acrylicity<B: GpuBackend>(
     graph: &Graph<B>,
     errors: &mut Vec<Error<GraphErrorContext<B>>>,
 ) {
     #[inline]
-    fn dfs<B: GpuBackend + Clone>(
+    fn dfs<B: GpuBackend>(
         node: NodeId,
         graph: &Graph<B>,
         visited: &mut [bool],
@@ -851,7 +886,7 @@ fn check_acrylicity<B: GpuBackend + Clone>(
 }
 
 #[inline]
-fn check_inputs_exist<B: GpuBackend + Clone>(
+fn check_inputs_exist<B: GpuBackend>(
     graph: &Graph<B>,
     errors: &mut Vec<Error<GraphErrorContext<B>>>,
 ) {
@@ -874,7 +909,7 @@ fn check_inputs_exist<B: GpuBackend + Clone>(
 }
 
 #[inline]
-fn check_metadata<B: GpuBackend + Clone>(
+fn check_metadata<B: GpuBackend>(
     graph: &Graph<B>,
     meta: Metadata,
     errors: &mut Vec<Error<GraphErrorContext<B>>>,
@@ -895,10 +930,7 @@ fn check_metadata<B: GpuBackend + Clone>(
     }
 }
 
-fn check_shapes<B: GpuBackend + Clone>(
-    graph: &Graph<B>,
-    errors: &mut Vec<Error<GraphErrorContext<B>>>,
-) {
+fn check_shapes<B: GpuBackend>(graph: &Graph<B>, errors: &mut Vec<Error<GraphErrorContext<B>>>) {
     for (node_id, node) in graph.nodes.iter().enumerate() {
         if node.shape.len() < 2 && !node.op.is_leaf() {
             errors.push(Error {
@@ -934,13 +966,13 @@ fn check_shapes<B: GpuBackend + Clone>(
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Graph<B: GpuBackend + Clone = GpuContext> {
+#[derive(Debug)]
+pub struct Graph<B: GpuBackend = GpuContext> {
     pub(crate) nodes: Vec<Node<B>>,
     pub(crate) loss: LossType,
 }
 
-impl<B: GpuBackend + Clone> Graph<B> {
+impl<B: GpuBackend> Graph<B> {
     #[must_use]
     pub const fn new(loss: LossType) -> Self {
         Self {
@@ -1103,10 +1135,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
     ///
     /// It is recommended that you run this function on your graph at least in debug mode, or
     /// you could have panics in production code.
-    pub fn validate(&self, meta: Metadata) -> Result<(), Vec<Error<GraphErrorContext<B>>>>
-    where
-        B: Clone,
-    {
+    pub fn validate(&self, meta: Metadata) -> Result<(), Vec<Error<GraphErrorContext<B>>>> {
         let mut errors = Vec::new();
 
         check_acrylicity(self, &mut errors);

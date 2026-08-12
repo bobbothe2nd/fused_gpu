@@ -1,17 +1,35 @@
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend, GpuBufferBackend, GpuKernelBackend, PollStatus, TargetCompilationOptions, backend::{Axis, DType, MetaId, NodeId, Op, Param, ParamTy, ValueId, ValueState, kernel::{Dependencies, RawKernel}},
-    }, errors::{Error, ErrorKind}, tensor::{build_dims, calc_grid},
+        CompilationOptions, GpuBackend, GpuBufferBackend, GpuKernelBackend, PollStatus,
+        TargetCompilationOptions,
+        backend::{
+            Axis, DType, MetaId, NodeId, Op, Param, ParamTy, ValueId, ValueState,
+            kernel::{Dependencies, RawKernel},
+        },
+    },
+    errors::{Error, ErrorKind},
+    tensor::{build_dims, calc_grid},
 };
 use alloc::{string::String, vec::Vec};
 use briny::raw::cast_slice;
 use core::{fmt::Write, num::NonZeroU64};
 use wgpu::{
-    BackendOptions, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, CommandBuffer, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Device, DeviceDescriptor, Dx12BackendOptions, Dx12Compiler, Dx12SwapchainKind, Dx12UseFrameLatencyWaitableObject, ExperimentalFeatures, Features, ForceShaderModelToken, GlBackendOptions, GlDebugFns, GlFenceBehavior, Gles3MinorVersion, Instance, InstanceDescriptor, InstanceFlags, Limits, MemoryBudgetThresholds, MemoryHints, NoopBackendOptions, PipelineCompilationOptions, PipelineLayout, PipelineLayoutDescriptor, PollType, PowerPreference, Queue, RequestAdapterError, RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource, ShaderStages, SubmissionIndex, Trace, util::{BufferInitDescriptor, DeviceExt},
+    BackendOptions, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry,
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType,
+    BufferDescriptor, BufferUsages, CommandBuffer, CommandEncoderDescriptor, ComputePassDescriptor,
+    ComputePipeline, ComputePipelineDescriptor, Device, DeviceDescriptor, Dx12BackendOptions,
+    Dx12Compiler, Dx12SwapchainKind, Dx12UseFrameLatencyWaitableObject, ExperimentalFeatures,
+    Features, ForceShaderModelToken, GlBackendOptions, GlDebugFns, GlFenceBehavior,
+    Gles3MinorVersion, Instance, InstanceDescriptor, InstanceFlags, Limits, MemoryBudgetThresholds,
+    MemoryHints, NoopBackendOptions, PipelineCompilationOptions, PipelineLayout,
+    PipelineLayoutDescriptor, PollType, PowerPreference, Queue, RequestAdapterError,
+    RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource, ShaderStages, SubmissionIndex,
+    Trace,
+    util::{BufferInitDescriptor, DeviceExt},
 };
 
 /// WGPU context for device and queue.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct GpuContext {
     device: Device,
     queue: Queue,
@@ -116,7 +134,7 @@ impl GpuKernelBackend for GpuKernel {
 }
 
 pub struct Schedule<'a> {
-    kernels: Vec<Vec<(&'a ComputePipeline, [u32; 3], BindGroup)>>,
+    kernels: Vec<(&'a ComputePipeline, [u32; 3], BindGroup)>,
 }
 
 impl GpuBackend for GpuContext {
@@ -182,6 +200,26 @@ impl GpuBackend for GpuContext {
             usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
         });
         encoder.copy_buffer_to_buffer(&src, 0, &buffer.0, 0, buffer.0.size());
+
+        Ok(self.queue.submit(Some(encoder.finish())))
+    }
+
+    fn pipe(&self, src: &Self::Buffer, dst: &Self::Buffer) -> Result<Self::SubmissionIndex, Error> {
+        let src_size = src.0.size();
+
+        if src_size != dst.0.size() {
+            return Err(Error {
+                msg: "buffers of unequal sizes during pipe",
+                kind: ErrorKind::FailedDownload,
+                ctx: (),
+            });
+        }
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor::default());
+
+        encoder.copy_buffer_to_buffer(&src.0, 0, &dst.0, 0, src_size);
 
         Ok(self.queue.submit(Some(encoder.finish())))
     }
@@ -295,8 +333,6 @@ impl GpuBackend for GpuContext {
         let mut scheduled_kernels = Vec::new();
 
         while resolved.len() < kernels.len() {
-            let mut kernels_inner = Vec::new();
-
             for (kernel, idx, params) in kernels {
                 if resolved.contains(idx) {
                     continue;
@@ -311,15 +347,17 @@ impl GpuBackend for GpuContext {
                     let kernel_bindings = bindings
                         .iter()
                         .enumerate()
-                        .filter_map(|(i, buf)| if params[i] {
-                            let entry = BindGroupEntry {
-                                binding: i as u32,
-                                resource: buf.0.as_entire_binding(),
-                            };
+                        .filter_map(|(i, buf)| {
+                            if params[i] {
+                                let entry = BindGroupEntry {
+                                    binding: i as u32,
+                                    resource: buf.0.as_entire_binding(),
+                                };
 
-                            Some(entry)
-                        } else {
-                            None
+                                Some(entry)
+                            } else {
+                                None
+                            }
                         })
                         .collect::<Vec<_>>();
 
@@ -331,11 +369,10 @@ impl GpuBackend for GpuContext {
                         label: Some("bind_group"),
                     });
 
-                    kernels_inner.push((kernel, grid, bind_group));
+                    scheduled_kernels.push((kernel, grid, bind_group));
                 }
             }
 
-            scheduled_kernels.push(kernels_inner);
             resolved.append(&mut tmp_res);
         }
 
@@ -344,33 +381,28 @@ impl GpuBackend for GpuContext {
         }
     }
 
-    fn launch_schedule(
-        &self,
-        schedule: &Self::Schedule<'_>,
-    ) {
-        for parallel in &schedule.kernels {
-            for (kernel, wg, bind_group) in parallel {
-                let mut encoder = self
-                    .device
-                    .create_command_encoder(&CommandEncoderDescriptor {
-                        label: Some("encoder"),
-                    });
+    fn launch_schedule(&self, schedule: &Self::Schedule<'_>) {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("encoder"),
+            });
 
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("pass"),
-                        timestamp_writes: None,
-                    });
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("pass"),
+                timestamp_writes: None,
+            });
 
-                    pass.set_pipeline(kernel);
-                    pass.set_bind_group(0, bind_group, &[]);
+            for (kernel, wg, bind_group) in &schedule.kernels {
+                pass.set_pipeline(kernel);
+                pass.set_bind_group(0, bind_group, &[]);
 
-                    pass.dispatch_workgroups(wg[0], wg[1], wg[2]);
-                }
-
-                self.queue.submit([encoder.finish()]);
+                pass.dispatch_workgroups(wg[0], wg[1], wg[2]);
             }
         }
+
+        self.queue.submit([encoder.finish()]);
     }
 
     #[inline]
@@ -479,7 +511,7 @@ fn generate_layout_desc(params: &[Param]) -> Vec<BindGroupLayoutEntry> {
                     has_dynamic_offset: false,
                     min_binding_size: match ty {
                         BufferBindingType::Uniform => None,
-                        _ => Some(MIN_BIND_SIZE),
+                        BufferBindingType::Storage { .. } => Some(MIN_BIND_SIZE),
                     },
                 },
                 count: None,
@@ -559,7 +591,10 @@ fn emit_bindings(kernel: &RawKernel, params: &[Param], out: &mut String, pretty_
         let pid = p.pid;
 
         if p.ty == ParamTy::Uniform && p.dtype == DType::UnsignedInt {
-            let _ = write!(out, "@group(0) @binding({pid}) {var_type} param{pid}: Meta;");
+            let _ = write!(
+                out,
+                "@group(0) @binding({pid}) {var_type} param{pid}: Meta;"
+            );
         } else {
             let _ = write!(
                 out,
@@ -1104,14 +1139,14 @@ fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &RawKernel
         }
 
         Op::WhileLoopBegin { cond } => {
-            let _ = write!(out, "while ",);
+            let _ = write!(out, "while ");
             process_op(out, cond, nesting, kernel);
-            let _ = write!(out, " {{",);
+            let _ = write!(out, " {{");
             *nesting += 1;
         }
 
         Op::ForeverLoopBegin => {
-            let _ = write!(out, "loop {{",);
+            let _ = write!(out, "loop {{");
             *nesting += 1;
         }
 

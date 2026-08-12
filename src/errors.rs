@@ -103,7 +103,7 @@ impl Display for ErrorKind {
 }
 
 #[derive(Debug, Clone)]
-pub enum GraphErrorContext<B: GpuBackend + Clone = GpuContext> {
+pub enum GraphErrorContext<B: GpuBackend = GpuContext> {
     CycleDetected {
         node: NodeId,
         path: Vec<NodeId>,

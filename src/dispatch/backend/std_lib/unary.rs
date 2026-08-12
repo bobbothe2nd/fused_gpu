@@ -11,7 +11,7 @@ use crate::{
 
 use alloc::{format, vec, vec::Vec};
 
-fn save_unary<B: GpuBackend + Clone>(
+fn save_unary<B: GpuBackend>(
     _: NodeId,
     node: &Node<B>,
     graph: &Graph<B>,
@@ -24,7 +24,7 @@ fn save_unary<B: GpuBackend + Clone>(
     }
 }
 
-fn valid_unary<B: GpuBackend + Clone>(
+fn valid_unary<B: GpuBackend>(
     node_id: NodeId,
     node: &Node<B>,
     _: &Graph<B>,
@@ -73,24 +73,24 @@ macro_rules! lower_unary {
             bool,
             &CompilationOptions<B>,
         ) -> Result<Vec<NodeId>, Error>,
-         root: NodeId,
-         input: NodeId,
-         resolved: &mut Vec<NodeId>,
-         backwardness: Option<u8>,
-         node_id: NodeId,
-         graph: &Graph<B>,
-         out: ValueId,
-         node_params: &[Option<ParamId>],
-         saved_params: &[Option<ParamId>],
-         kernel: &mut LinkedKernel,
-         base: ValueId,
-         idx: ValueId,
-         local_row: ValueId,
-         local_col: ValueId,
-         shared_size: u32,
-         tile_size: ValueId,
-         stable_iteration_space: bool,
-         options: &CompilationOptions<B>| {
+        root: NodeId,
+        input: NodeId,
+        resolved: &mut Vec<NodeId>,
+        backwardness: Option<u8>,
+        node_id: NodeId,
+        graph: &Graph<B>,
+        out: ValueId,
+        node_params: &[Option<ParamId>],
+        saved_params: &[Option<ParamId>],
+        kernel: &mut LinkedKernel,
+        base: ValueId,
+        idx: ValueId,
+        local_row: ValueId,
+        local_col: ValueId,
+        shared_size: u32,
+        tile_size: ValueId,
+        stable_iteration_space: bool,
+        options: &CompilationOptions<B>| {
             let mut deepest;
 
             match backwardness {
@@ -223,7 +223,7 @@ macro_rules! lower_unary {
     };
 }
 
-impl<B: GpuBackend + Clone> Graph<B> {
+impl<B: GpuBackend> Graph<B> {
     pub fn log(&mut self, x: NodeId) -> NodeId {
         self.add_node(
             GraphOp::Custom {
@@ -232,15 +232,15 @@ impl<B: GpuBackend + Clone> Graph<B> {
                     |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId| kernel
                         .raw
                         .overwrite_var(out, Op::Log { x: inp }),
-                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId, upstream: ValueId| kernel
-                        .raw
-                        .accum_var(
+                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId, upstream: ValueId| {
+                        kernel.raw.accum_var(
                             out,
                             Op::Div {
                                 a: upstream,
-                                b: inp
-                            }
-                        ),
+                                b: inp,
+                            },
+                        )
+                    },
                 ),
                 display: |inputs| format!("log2({:?})", inputs[0]),
                 save: save_unary::<B>,
@@ -703,15 +703,15 @@ impl<B: GpuBackend + Clone> Graph<B> {
                     |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId| kernel
                         .raw
                         .overwrite_var(out, Op::Exp { x: inp }),
-                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId, upstream: ValueId| kernel
-                        .raw
-                        .accum_var(
+                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId, upstream: ValueId| {
+                        kernel.raw.accum_var(
                             out,
                             Op::Mul {
                                 a: upstream,
                                 b: inp,
-                            }
-                        ),
+                            },
+                        )
+                    },
                 ),
                 display: |inputs| format!("e^{:?}", inputs[0]),
                 save: save_unary::<B>,

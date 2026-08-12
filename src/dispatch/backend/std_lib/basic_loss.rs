@@ -40,7 +40,9 @@ impl LossType {
             );
 
             let log_pred =
-                kernel.raw.def_var(DType::Float, ValueState::Immut, Some(Op::Log { x: pred }));
+                kernel
+                    .raw
+                    .def_var(DType::Float, ValueState::Immut, Some(Op::Log { x: pred }));
 
             let one_minus_target = kernel.raw.def_var(
                 DType::Float,
@@ -132,11 +134,15 @@ impl LossType {
                 );
 
                 let log_pred =
-                    kernel.raw.def_var(DType::Float, ValueState::Inline, Some(Op::Log { x: pred }));
+                    kernel
+                        .raw
+                        .def_var(DType::Float, ValueState::Inline, Some(Op::Log { x: pred }));
 
                 kernel.raw.overwrite_var(loss_val, Op::Neg { x: log_pred });
 
-                kernel.raw.overwrite_var(grad_val, Op::Sub { a: pred, b: one });
+                kernel
+                    .raw
+                    .overwrite_var(grad_val, Op::Sub { a: pred, b: one });
             });
 
             (loss_val, grad_val)

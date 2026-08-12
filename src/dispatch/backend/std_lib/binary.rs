@@ -2,8 +2,9 @@ use crate::{
     dispatch::{
         GpuBackend,
         backend::{
-            CompilationOptions, DType, DispatchOptions, Graph, GraphOp, MetaId, Node,
-            NodeId, NodeInput, Op, ParamId, ValueId, ValueState, kernel::{SaveIndicator, LinkedKernel},
+            CompilationOptions, DType, DispatchOptions, Graph, GraphOp, MetaId, Node, NodeId,
+            NodeInput, Op, ParamId, ValueId, ValueState,
+            kernel::{LinkedKernel, SaveIndicator},
         },
     },
     errors::{Error, ErrorKind, GraphErrorContext},
@@ -11,7 +12,7 @@ use crate::{
 
 use alloc::{format, vec, vec::Vec};
 
-fn valid_binary<B: GpuBackend + Clone>(
+fn valid_binary<B: GpuBackend>(
     node_id: NodeId,
     node: &Node<B>,
     graph: &Graph<B>,
@@ -63,7 +64,7 @@ fn valid_binary<B: GpuBackend + Clone>(
     }
 }
 
-fn save_mul_div<B: GpuBackend + Clone>(
+fn save_mul_div<B: GpuBackend>(
     _node_id: NodeId,
     node: &Node<B>,
     graph: &Graph<B>,
@@ -76,7 +77,7 @@ fn save_mul_div<B: GpuBackend + Clone>(
     }
 }
 
-impl<B: GpuBackend + Clone> Graph<B> {
+impl<B: GpuBackend> Graph<B> {
     pub fn add(&mut self, a: NodeId, b: NodeId) -> NodeId {
         self.add_node(
             GraphOp::Custom {
@@ -171,7 +172,9 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             deepest.append(&mut a_deep);
                             deepest.append(&mut b_deep);
 
-                            kernel.raw.overwrite_var(out, Op::Add { a: a_val, b: b_val });
+                            kernel
+                                .raw
+                                .overwrite_var(out, Op::Add { a: a_val, b: b_val });
                         }
 
                         Some(0 | 1) => {
@@ -319,7 +322,9 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             deepest.append(&mut a_deep);
                             deepest.append(&mut b_deep);
 
-                            kernel.raw.overwrite_var(out, Op::Mul { a: a_val, b: b_val });
+                            kernel
+                                .raw
+                                .overwrite_var(out, Op::Mul { a: a_val, b: b_val });
                         }
 
                         Some(0) => {
@@ -515,7 +520,9 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             deepest.append(&mut a_deep);
                             deepest.append(&mut b_deep);
 
-                            kernel.raw.overwrite_var(out, Op::Sub { a: a_val, b: b_val });
+                            kernel
+                                .raw
+                                .overwrite_var(out, Op::Sub { a: a_val, b: b_val });
                         }
 
                         Some(0) => {
@@ -695,7 +702,9 @@ impl<B: GpuBackend + Clone> Graph<B> {
                             deepest.append(&mut a_deep);
                             deepest.append(&mut b_deep);
 
-                            kernel.raw.overwrite_var(out, Op::Div { a: a_val, b: b_val });
+                            kernel
+                                .raw
+                                .overwrite_var(out, Op::Div { a: a_val, b: b_val });
                         }
 
                         Some(0) => {
@@ -825,7 +834,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
     }
 }
 
-fn get_shape<B: GpuBackend + Clone>(a: NodeId, b: NodeId, graph: &Graph<B>) -> Vec<MetaId> {
+fn get_shape<B: GpuBackend>(a: NodeId, b: NodeId, graph: &Graph<B>) -> Vec<MetaId> {
     let a_node = &graph.nodes[a];
     let b_node = &graph.nodes[b];
 

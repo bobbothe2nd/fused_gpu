@@ -1,8 +1,10 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use fused_gpu::dispatch::{
-    CompilationOptions, GpuContext, Schedule, backend::{Graph, LossType, Metadata, kernel::KernelsChained},
+    CompilationOptions, GpuContext, Schedule,
+    backend::{Graph, LossType, Metadata, kernel::KernelsChained},
 };
+use gpu_telemetry::monitor::GpuMonitor;
 
 fn matmul_chain3_forward_backward() {
     const M: u32 = 16;
@@ -76,13 +78,46 @@ fn matmul_chain3_forward_backward() {
 
     let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
 
+    let monitor: GpuMonitor = GpuMonitor::start(Duration::from_millis(20)).unwrap();
+
     model_runtime(&ctx, &schedule);
+
+    let telemetry = monitor.stop().unwrap();
+
+    for (i, sample) in telemetry.samples.iter().enumerate() {
+        println!("SAMPLE {i}:");
+
+        for heap in &sample.heaps {
+            println!(" {} HEAP:", if heap.dev_local {
+                "LOCAL"
+            } else {
+                "SHARED"
+            });
+
+            if let Some(size) = heap.size {
+                println!("  size: {size},");
+            }
+
+            if let Some(budget) = heap.budget {
+                println!("  budget: {budget},");
+            }
+
+            if let Some(usage) = heap.usage {
+                println!("  usage: {usage},");
+            }
+
+            if let Some(reservation) = heap.reservation {
+                println!("  reservation: {reservation},");
+            }
+
+            if let Some(available) = heap.available_for_reservation {
+                println!("  available for reservation: {available},");
+            }
+        }
+    }
 }
 
-fn model_runtime(
-    ctx: &GpuContext,
-    schedule: &Schedule,
-) {
+fn model_runtime(ctx: &GpuContext, schedule: &Schedule) {
     for iters in [100, 10, 1] {
         let runtime_start = Instant::now();
 

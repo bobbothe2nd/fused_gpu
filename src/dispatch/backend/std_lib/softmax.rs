@@ -1,13 +1,17 @@
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend, backend::{
-            Axis, DType, DispatchOptions, Graph, GraphOp, Node, NodeId, Op, ParamId, ValueId, ValueState, kernel::{LinkedKernel, NodeInput, SaveIndicator},
+        CompilationOptions, GpuBackend,
+        backend::{
+            Axis, DType, DispatchOptions, Graph, GraphOp, Node, NodeId, Op, ParamId, ValueId,
+            ValueState,
+            kernel::{LinkedKernel, NodeInput, SaveIndicator},
         },
-    }, errors::{Error, ErrorKind, GraphErrorContext},
+    },
+    errors::{Error, ErrorKind, GraphErrorContext},
 };
 use alloc::{format, vec, vec::Vec};
 
-pub fn lower_softmax_recursive<B: GpuBackend + Clone>(
+pub fn lower_softmax_recursive<B: GpuBackend>(
     eval_node: impl Fn(
         NodeId,
         NodeId,
@@ -155,7 +159,9 @@ pub fn lower_softmax_recursive<B: GpuBackend + Clone>(
                     },
                 );
 
-                kernel.raw.accum_var(col, Op::ConstU32 { value: shared_size });
+                kernel
+                    .raw
+                    .accum_var(col, Op::ConstU32 { value: shared_size });
             });
 
             kernel.raw.shared_store(tmp_shared, tid, local_max);
@@ -231,7 +237,9 @@ pub fn lower_softmax_recursive<B: GpuBackend + Clone>(
                     kernel.raw.push_break();
                 });
 
-                kernel.raw.overwrite_var(stride, Op::Shr { a: stride, b: one });
+                kernel
+                    .raw
+                    .overwrite_var(stride, Op::Shr { a: stride, b: one });
             });
 
             let row_max = kernel.raw.def_var(
@@ -313,7 +321,9 @@ pub fn lower_softmax_recursive<B: GpuBackend + Clone>(
 
                 kernel.raw.accum_var(local_sum, Op::CopyVar { id: e });
 
-                kernel.raw.accum_var(col, Op::ConstU32 { value: shared_size });
+                kernel
+                    .raw
+                    .accum_var(col, Op::ConstU32 { value: shared_size });
 
                 Ok(())
             })?;
@@ -322,7 +332,9 @@ pub fn lower_softmax_recursive<B: GpuBackend + Clone>(
 
             kernel.raw.push_barrier();
 
-            kernel.raw.overwrite_var(stride, Op::CopyVar { id: stride_const });
+            kernel
+                .raw
+                .overwrite_var(stride, Op::CopyVar { id: stride_const });
 
             kernel.push_forever_loop(|kernel| {
                 let tid_less_stride = kernel.raw.def_var(
@@ -361,7 +373,9 @@ pub fn lower_softmax_recursive<B: GpuBackend + Clone>(
                     kernel.raw.push_break();
                 });
 
-                kernel.raw.overwrite_var(stride, Op::Shr { a: stride, b: one });
+                kernel
+                    .raw
+                    .overwrite_var(stride, Op::Shr { a: stride, b: one });
             });
 
             let row_sum = kernel.raw.def_var(
@@ -407,7 +421,9 @@ pub fn lower_softmax_recursive<B: GpuBackend + Clone>(
                     kernel.param_mul(output, idx, inv_row_sum);
                 }
 
-                kernel.raw.accum_var(col, Op::ConstU32 { value: shared_size });
+                kernel
+                    .raw
+                    .accum_var(col, Op::ConstU32 { value: shared_size });
             });
 
             x_deep
@@ -482,7 +498,9 @@ pub fn lower_softmax_recursive<B: GpuBackend + Clone>(
                     },
                 );
 
-                kernel.raw.accum_var(col, Op::ConstU32 { value: shared_size });
+                kernel
+                    .raw
+                    .accum_var(col, Op::ConstU32 { value: shared_size });
             });
 
             kernel.raw.shared_store(tmp_shared, tid, local_dot);
@@ -540,7 +558,9 @@ pub fn lower_softmax_recursive<B: GpuBackend + Clone>(
                     kernel.raw.push_break();
                 });
 
-                kernel.raw.overwrite_var(stride, Op::Shr { a: stride, b: one });
+                kernel
+                    .raw
+                    .overwrite_var(stride, Op::Shr { a: stride, b: one });
             });
 
             let row_dot = kernel.raw.def_var(
@@ -601,7 +621,7 @@ pub fn lower_softmax_recursive<B: GpuBackend + Clone>(
                         index: idx,
                     }),
                 );
-                
+
                 kernel.register_param(saved_param);
 
                 let dy_minus_row_dot = kernel.raw.def_var(
@@ -630,7 +650,9 @@ pub fn lower_softmax_recursive<B: GpuBackend + Clone>(
 
                 kernel.param_accum(grad, idx, y_scaled_dy_dot);
 
-                kernel.raw.accum_var(col, Op::ConstU32 { value: shared_size });
+                kernel
+                    .raw
+                    .accum_var(col, Op::ConstU32 { value: shared_size });
 
                 Ok(())
             })?;
@@ -646,9 +668,9 @@ pub fn lower_softmax_recursive<B: GpuBackend + Clone>(
     }
 }
 
-impl<B: GpuBackend + Clone> Graph<B> {
+impl<B: GpuBackend> Graph<B> {
     pub fn softmax(&mut self, x: NodeId) -> NodeId {
-        fn save<B: GpuBackend + Clone>(
+        fn save<B: GpuBackend>(
             node_id: NodeId,
             node: &Node<B>,
             graph: &Graph<B>,
@@ -675,7 +697,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
             }
         }
 
-        fn valid_shape<B: GpuBackend + Clone>(
+        fn valid_shape<B: GpuBackend>(
             node_id: NodeId,
             node: &Node<B>,
             _graph: &Graph<B>,

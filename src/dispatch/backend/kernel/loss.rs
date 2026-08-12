@@ -1,10 +1,14 @@
 use crate::dispatch::{
-    GpuBackend, backend::{Axis, DType, Graph, Metadata, Op, Param, ParamTy, ValueState, kernel::{Kernel, RawKernel}},
+    GpuBackend,
+    backend::{
+        Axis, DType, Graph, Metadata, Op, Param, ParamTy, ValueState,
+        kernel::{Kernel, RawKernel},
+    },
 };
 use alloc::vec::Vec;
 
 #[inline]
-pub fn lower_loss<B: GpuBackend + Clone>(graph: &Graph<B>, meta: Metadata) -> Kernel {
+pub fn lower_loss<B: GpuBackend>(graph: &Graph<B>, meta: Metadata) -> Kernel {
     let root = graph.nodes.len() - 1;
     let root_node = &graph.nodes[root];
 
@@ -90,7 +94,9 @@ pub fn lower_loss<B: GpuBackend + Clone>(graph: &Graph<B>, meta: Metadata) -> Ke
     kernel.raw.update_var_state(total, ValueState::Mut);
 
     if dims.len() > 1 {
-        let gid2 = kernel.raw.def_var(DType::UnsignedInt, ValueState::Mut, None);
+        let gid2 = kernel
+            .raw
+            .def_var(DType::UnsignedInt, ValueState::Mut, None);
 
         for (i, &d) in dims.iter().enumerate().skip(1) {
             kernel.raw.overwrite_var(

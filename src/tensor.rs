@@ -51,9 +51,12 @@ pub(crate) fn calc_grid(shape: &[u32], block: [u32; 3]) -> [u32; 3] {
     }
 }
 
-#[derive(Debug, Clone)]
+// Core compute storage primitive.
+//
+// Actively used in
+#[derive(Debug)]
 pub struct Tensor<B: GpuBackend = crate::dispatch::backend::GpuContext> {
-    pub(crate) shape: Option<Vec<u32>>,
+    pub(crate) shape: Vec<u32>,
     pub(crate) data: GpuBuffer<B>,
 }
 
@@ -66,29 +69,30 @@ impl<B: GpuBackend> PartialEq for Tensor<B> {
 impl<B: GpuBackend> Eq for Tensor<B> {}
 
 impl<B: GpuBackend> Tensor<B> {
+    /// Calculates the required grid provided the block size of the kernel.
+    ///
+    /// Divides the last two dimensions
     #[inline]
     #[must_use]
     pub fn calc_grid(&self, block: [u32; 3]) -> [u32; 3] {
-        self.shape
-            .as_ref()
-            .map_or([0; 3], |shape| calc_grid(shape, block))
+        calc_grid(&self.shape, block)
     }
 
     /// Returns the rank (length of shape) of the tensor.
     ///
-    /// To get just the shape, use [`Tensor::dims`].
+    /// To get the full shape, use [`Tensor::dims`].
     #[inline]
     #[must_use]
     pub fn rank(&self) -> usize {
-        self.shape.as_ref().map_or(2, Vec::len)
+        self.shape.len()
     }
 
     /// Returns the dimensions of the tenosr as raw `u32`.
     ///
     /// This is a borrowed slice into the shape with length `self.rank()`.
     #[inline]
-    pub fn dims(&self) -> Result<&Vec<u32>, u32> {
-        self.shape.as_ref().ok_or_else(|| self.data.size())
+    pub fn dims(&self) -> &[u32] {
+        &self.shape
     }
 
     /// Returns the exact length of the data.

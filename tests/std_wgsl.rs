@@ -1,7 +1,8 @@
 extern crate alloc;
 
 use fused_gpu::dispatch::{
-    CompilationOptions, GpuContext, backend::{Graph, LossType, Metadata, kernel::KernelsChained},
+    CompilationOptions, GpuContext,
+    backend::{Graph, LossType, Metadata, kernel::KernelsChained},
 };
 
 #[test]

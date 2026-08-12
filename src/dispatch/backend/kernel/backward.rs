@@ -2,15 +2,21 @@ use core::cmp::Ordering;
 
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend, backend::{
-            Axis, DType, DispatchOptions, Graph, GraphOp, Metadata, Node, NodeId, Op, Param, ParamId, ParamTy, ValueId, ValueState, kernel::{Dependencies, KernelsChained, LinkedKernel, NodeInput, RawKernel, SaveIndicator},
+        CompilationOptions, GpuBackend,
+        backend::{
+            Axis, DType, DispatchOptions, Graph, GraphOp, Metadata, Node, NodeId, Op, Param,
+            ParamId, ParamTy, ValueId, ValueState,
+            kernel::{
+                Dependencies, KernelsChained, LinkedKernel, NodeInput, RawKernel, SaveIndicator,
+            },
         },
-    }, errors::{Error, ErrorKind},
+    },
+    errors::{Error, ErrorKind},
 };
 use alloc::{vec, vec::Vec};
 
 #[inline]
-pub fn lower_backward<'a, B: GpuBackend + Clone>(
+pub fn lower_backward<B: GpuBackend>(
     graph: &Graph<B>,
     meta: Metadata,
     saved: &[SaveIndicator],
@@ -107,13 +113,8 @@ pub fn lower_backward<'a, B: GpuBackend + Clone>(
 
                 let root_node = &graph.nodes[root];
 
-                let (mut kernel, base, gid) = gen_kernel(
-                    meta,
-                    params.clone(),
-                    [tile_size, tile_size, 1],
-                    root,
-                    root_node,
-                );
+                let (mut kernel, base, gid) =
+                    gen_kernel(meta, &params, [tile_size, tile_size, 1], root, root_node);
 
                 let upstream = kernel.raw.def_var(
                     DType::Float,
@@ -213,13 +214,10 @@ pub fn lower_backward<'a, B: GpuBackend + Clone>(
         kernels.append(&mut grad_kernels);
     }
 
-    Ok(KernelsChained {
-        kernels,
-        params,
-    })
+    Ok(KernelsChained { kernels, params })
 }
 
-fn eval_grad<B: GpuBackend + Clone>(
+fn eval_grad<B: GpuBackend>(
     root: NodeId,
     input: NodeId,
     node_id: &NodeInput,
@@ -248,7 +246,7 @@ fn eval_grad<B: GpuBackend + Clone>(
                     index: idx,
                 },
             );
-            
+
             kernel.register_param(*param);
 
             return Ok(Vec::new());
@@ -269,7 +267,7 @@ fn eval_grad<B: GpuBackend + Clone>(
                 index: idx,
             },
         );
-        
+
         kernel.register_param(1);
 
         return Ok(deepest);
@@ -302,7 +300,9 @@ fn eval_grad<B: GpuBackend + Clone>(
             kind: ErrorKind::ParamNotMaterialized,
             ctx: (),
         })?;
-        kernel.raw.accum_var(upstream, Op::ParamLoad { param, index: idx });
+        kernel
+            .raw
+            .accum_var(upstream, Op::ParamLoad { param, index: idx });
 
         kernel.register_param(param);
 
@@ -358,9 +358,9 @@ fn eval_grad<B: GpuBackend + Clone>(
     Ok(deepest)
 }
 
-fn gen_kernel<B: GpuBackend + Clone>(
+fn gen_kernel<B: GpuBackend>(
     meta: Metadata,
-    params: Vec<Param>,
+    params: &[Param],
     block: [u32; 3],
     input: NodeId,
     root_node: &Node<B>,
@@ -418,7 +418,9 @@ fn gen_kernel<B: GpuBackend + Clone>(
     kernel.raw.update_var_state(total, ValueState::Mut);
 
     if dims.len() > 1 {
-        let gid2 = kernel.raw.def_var(DType::UnsignedInt, ValueState::Mut, None);
+        let gid2 = kernel
+            .raw
+            .def_var(DType::UnsignedInt, ValueState::Mut, None);
 
         for (i, &d) in dims.iter().enumerate().skip(1) {
             kernel.raw.overwrite_var(
@@ -429,7 +431,9 @@ fn gen_kernel<B: GpuBackend + Clone>(
             );
 
             if i >= 2 {
-                kernel.raw.overwrite_var(gid2, Op::Mul { a: total, b: gid2 });
+                kernel
+                    .raw
+                    .overwrite_var(gid2, Op::Mul { a: total, b: gid2 });
 
                 if i == 2 {
                     kernel.raw.update_var_state(base, ValueState::Masked);

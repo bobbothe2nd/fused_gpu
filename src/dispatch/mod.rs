@@ -1,12 +1,15 @@
 //! Full dispatch of math operations and GPU contVec;
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use core::{fmt::Debug, marker::PhantomData};
 
 use crate::{
     dispatch::backend::{
-        Graph, MetaId, NodeId, Param, kernel::{Dependencies, RawKernel, SaveIndicator},
-    }, errors::Error, tensor::{Tensor, build_dims},
+        Graph, MetaId, NodeId, Param,
+        kernel::{Dependencies, RawKernel, SaveIndicator},
+    },
+    errors::Error,
+    tensor::{Tensor, build_dims},
 };
 use briny::{
     raw::{slice_to_bytes, slice_to_bytes_mut},
@@ -23,8 +26,8 @@ pub enum PollStatus {
     Ready,
 }
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-pub struct CompilationOptions<B: GpuBackend + ?Sized> {
+#[derive(Debug, Hash, PartialEq, Eq)]
+pub struct CompilationOptions<B: GpuBackend> {
     pub target: TargetCompilationOptions<B>,
     pub debug: DebugCompilationOptions,
     pub opt: OptCompilationOptions,
@@ -40,8 +43,8 @@ impl<B: GpuBackend> Default for CompilationOptions<B> {
     }
 }
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-pub struct TargetCompilationOptions<B: GpuBackend + ?Sized> {
+#[derive(Debug, Hash, PartialEq, Eq)]
+pub struct TargetCompilationOptions<B: GpuBackend> {
     /// Support for linear algebra accelerator (e.g. tensor cores)?
     pub lin_acc: bool,
 
@@ -71,6 +74,7 @@ pub struct DebugCompilationOptions {
     pub pretty_print_ir: bool,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for DebugCompilationOptions {
     fn default() -> Self {
         Self {
@@ -96,7 +100,7 @@ impl Default for OptCompilationOptions {
     }
 }
 
-pub trait GpuBufferBackend: Debug + Clone {
+pub trait GpuBufferBackend: Debug {
     fn size(&self) -> u32;
 
     fn size_bytes(&self) -> u32;
@@ -108,6 +112,7 @@ pub trait GpuKernelBackend {
 }
 
 pub trait GpuBackend: Sized {
+    /// The target-specific configuration for the compiler.
     const TARGET_SPEC: TargetCompilationOptions<Self>;
 
     type Buffer: GpuBufferBackend;
@@ -117,14 +122,24 @@ pub trait GpuBackend: Sized {
     type Schedule<'a>;
     type SyncSubmissions;
 
+    /// Allocates an uninitialized GPU buffer with the size `len` in bytes.
     fn alloc(&self, len: usize) -> Self::Buffer;
 
+    /// Allocates a slice of `u8` (to be reinterpreted as larger datatypes).
     fn alloc_init(&self, data: &[u8]) -> Self::Buffer;
 
+    /// Allocates a slice of `u32` on the GPU.
+    ///
+    /// This allocation is often small and uniform.
     fn alloc_meta(&self, data: &[u32]) -> Self::Buffer;
 
+    /// Copies the content of a CPU buffer to a GPU buffer.
     fn upload(&self, buffer: &Self::Buffer, data: &[u8]) -> Result<Self::SubmissionIndex, Error>;
 
+    /// Copies the content of one buffer to another.
+    fn pipe(&self, src: &Self::Buffer, dst: &Self::Buffer) -> Result<Self::SubmissionIndex, Error>;
+
+    /// Copies the content of a GPU buffer to a CPU buffer.
     fn download(&self, buffer: &Self::Buffer, out: &mut [u8]) -> Result<(), Error>;
 
     fn compile(
@@ -141,10 +156,7 @@ pub trait GpuBackend: Sized {
         meta: &[u32],
     ) -> Self::Schedule<'a>;
 
-    fn launch_schedule(
-        &self,
-        schedule: &Self::Schedule<'_>,
-    );
+    fn launch_schedule(&self, schedule: &Self::Schedule<'_>);
 
     fn launch_kernel(
         &self,
@@ -158,10 +170,6 @@ pub trait GpuBackend: Sized {
     fn submit(&self, submission: Self::SyncSubmissions) -> Self::SubmissionIndex;
 
     fn poll(&self) -> PollStatus;
-}
-
-pub trait Pipeline<B: GpuBackend> {
-    fn submit(&self) -> B::SubmissionIndex;
 }
 
 /// Allocate a buffer on the GPU.
@@ -197,6 +205,10 @@ impl<B: GpuBackend> GpuBuffer<B> {
     }
 }
 
+/// A group of compiled kernels including all required metadata.
+///
+/// It includes the kernels of the forward, backward, and loss passes, the order
+/// in which to execute them, and the parameters they use.
 #[derive(Debug)]
 pub struct KernelGroup<'a, B: GpuBackend = backend::GpuContext> {
     pub(crate) forward: Vec<(Dependencies<B::Kernel>, usize, &'a [bool])>,
@@ -204,6 +216,7 @@ pub struct KernelGroup<'a, B: GpuBackend = backend::GpuContext> {
     pub(crate) loss: B::Kernel,
 }
 
+/// Handle to a series of GPU submissions.
 #[must_use]
 pub struct SubmissionIndex<'a, B: GpuBackend>(B::SubmissionIndex, &'a GpuContext<B>);
 
@@ -213,6 +226,7 @@ impl<B: GpuBackend> SubmissionIndex<'_, B> {
     }
 }
 
+/// Handle to a series of unsubmitted GPU kernels.
 #[must_use]
 pub struct SyncSubmission<'a, B: GpuBackend>(B::SyncSubmissions, &'a GpuContext<B>);
 
@@ -222,12 +236,16 @@ impl<'a, B: GpuBackend> SyncSubmission<'a, B> {
     }
 }
 
+/// Schedule used to improve performance by caching critical launch information.
 pub struct Schedule<'a, B: GpuBackend = backend::GpuContext> {
     forward: B::Schedule<'a>,
     backward: B::Schedule<'a>,
 }
 
 /// Generic GPU context storing a handle to the device and shaders.
+///
+/// Perhaps most important structure in all of Fused GPU this is. Without it,
+/// you couldn't compile kernels, execute kernels, create tensors, copy data.
 #[repr(transparent)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuContext<B: GpuBackend = backend::GpuContext> {
@@ -236,6 +254,11 @@ pub struct GpuContext<B: GpuBackend = backend::GpuContext> {
 
 impl GpuContext<backend::GpuContext> {
     /// Non-blocking creation of the context by searching for GPU.
+    ///
+    /// # Errors
+    ///
+    /// Failure is platform-specific and backend-dependent. It is likely a result of
+    /// not finding a supported device. Errors must be handled properly in critical code.
     pub async fn new() -> Result<Self, Error> {
         Ok(Self {
             inner: backend::GpuContext::new().await?,
@@ -250,6 +273,11 @@ impl<B: GpuBackend> GpuContext<B> {
     }
 
     /// Compiles a graph into a kernels.
+    ///
+    /// # Errors
+    ///
+    /// Failure is platform-specific and backend-dependent but often a result of invalid input.
+    /// Regardless, errors must be handled properly in critical code.
     pub fn compile<'a>(
         &self,
         ir: &'a backend::kernel::KernelGroup,
@@ -308,11 +336,25 @@ impl<B: GpuBackend> GpuContext<B> {
         })
     }
 
+    /// Copies the content of a GPU buffer into a CPU buffer.
+    ///
+    /// # Errors
+    ///
+    /// Failure is platform-specific and backend-dependent. It might only return an error
+    /// if buffer lengths are unequal, but its behavior should not be assumed. Errors
+    /// must be handled properly in critical code.
     pub fn download<T: Pod>(&self, tensor: &Tensor<B>, dst: &mut [T]) -> Result<(), Error> {
         self.inner
             .download(&tensor.data.inner, slice_to_bytes_mut(dst))
     }
 
+    /// Copies the content of a CPU buffer into GPU buffer.
+    ///
+    /// # Errors
+    ///
+    /// Failure is platform-specific and backend-dependent. It might only return an error
+    /// if buffer lengths are unequal, but its behavior should not be assumed. Errors
+    /// must be handled properly in critical code.
     pub fn upload<T: Pod>(
         &self,
         tensor: &Tensor<B>,
@@ -320,6 +362,26 @@ impl<B: GpuBackend> GpuContext<B> {
     ) -> Result<SubmissionIndex<'_, B>, Error> {
         self.inner
             .upload(&tensor.data.inner, slice_to_bytes(dst))
+            .map(|x| SubmissionIndex(x, self))
+    }
+
+    /// Copies the content of one buffer to another without mutating the source.
+    ///
+    /// This is faster than chaining [`Self::download`] into [`Self::upload`] because it
+    /// bypasses CPU memory.
+    ///
+    /// # Errors
+    ///
+    /// Failure is platform-specific and backend-dependent. It might only return an error
+    /// if buffer lengths are unequal, but its behavior should not be assumed. Errors
+    /// must be handled properly in critical code.
+    pub fn pipe<T: Pod>(
+        &self,
+        src: &Tensor<B>,
+        dst: &Tensor<B>,
+    ) -> Result<SubmissionIndex<'_, B>, Error> {
+        self.inner
+            .pipe(&src.data.inner, &dst.data.inner)
             .map(|x| SubmissionIndex(x, self))
     }
 
@@ -364,20 +426,14 @@ impl<B: GpuBackend> GpuContext<B> {
 
         let backward = self.inner.schedule(&kernels.backward, &bindings, meta);
 
-        Schedule {
-            forward,
-            backward,
-        }
+        Schedule { forward, backward }
     }
 
     /// Launches a forward kernel from the compiled kernels with metadata and tensors.
     ///
     /// This function relies on the assumption that tensors matches the graph inputs and
     /// the metadata matches the graph metadata when compiling.
-    pub fn launch_forward(
-        &self,
-        schedule: &Schedule<'_, B>,
-    ) {
+    pub fn launch_forward(&self, schedule: &Schedule<'_, B>) {
         self.inner.launch_schedule(&schedule.forward);
     }
 
@@ -385,10 +441,7 @@ impl<B: GpuBackend> GpuContext<B> {
     ///
     /// This function relies on the assumption that tensors matches the graph inputs and
     /// the metadata matches the graph metadata when compiling.
-    pub fn launch_backward(
-        &self,
-        schedule: &Schedule<'_, B>,
-    ) {
+    pub fn launch_backward(&self, schedule: &Schedule<'_, B>) {
         self.inner.launch_schedule(&schedule.backward);
     }
 
@@ -408,7 +461,10 @@ impl<B: GpuBackend> GpuContext<B> {
             &target.data.inner,
         ];
 
-        SyncSubmission(self.inner.launch_kernel(&kernels.loss, grid, &bindings), self)
+        SyncSubmission(
+            self.inner.launch_kernel(&kernels.loss, grid, &bindings),
+            self,
+        )
     }
 
     pub fn alloc_tensors(
@@ -457,7 +513,7 @@ impl<B: GpuBackend> GpuContext<B> {
         let len = shape.iter().product::<u32>() as usize;
         let data = self.inner.alloc(len);
         Tensor {
-            shape: Some(shape.to_vec()),
+            shape: shape.to_vec(),
             data: GpuBuffer { inner: data },
         }
     }
@@ -471,7 +527,7 @@ impl<B: GpuBackend> GpuContext<B> {
 
         let data = gpu_alloc_init(&self.inner, data);
         Tensor {
-            shape: Some(shape.to_vec()),
+            shape: shape.to_vec(),
             data,
         }
     }
@@ -479,17 +535,23 @@ impl<B: GpuBackend> GpuContext<B> {
     /// Allocates an empty one-hot vector.
     pub fn new_onehot(&self, classes: u32) -> Tensor<B> {
         let data = gpu_alloc(&self.inner, classes as usize);
-        Tensor { data, shape: None }
+        Tensor {
+            data,
+            shape: vec![classes],
+        }
     }
 
     /// Allocates a new one-hot vector with the defined classes.
     pub fn new_onehot_init(&self, indices: &[u32]) -> Tensor<B> {
         let data = gpu_alloc_init(&self.inner, indices);
-        Tensor { data, shape: None }
+        Tensor {
+            data,
+            shape: vec![indices.len() as u32],
+        }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AllocTensors<B: GpuBackend = backend::GpuContext> {
     pub meta: B::Buffer,
     pub forward_saved: Vec<Tensor<B>>,

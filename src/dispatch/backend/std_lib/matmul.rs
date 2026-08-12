@@ -1,13 +1,17 @@
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend, backend::{
-            Axis, DType, DispatchOptions, Graph, GraphOp, Node, NodeId, Op, ParamId, ValueId, ValueState, kernel::{LinkedKernel, NodeInput, SaveIndicator},
+        CompilationOptions, GpuBackend,
+        backend::{
+            Axis, DType, DispatchOptions, Graph, GraphOp, Node, NodeId, Op, ParamId, ValueId,
+            ValueState,
+            kernel::{LinkedKernel, NodeInput, SaveIndicator},
         },
-    }, errors::{Error, ErrorKind, GraphErrorContext},
+    },
+    errors::{Error, ErrorKind, GraphErrorContext},
 };
 use alloc::{format, vec, vec::Vec};
 
-pub fn lower_matmul_recursive<B: GpuBackend + Clone>(
+pub fn lower_matmul_recursive<B: GpuBackend>(
     eval_node: impl Fn(
         NodeId,
         NodeId,
@@ -166,7 +170,7 @@ pub fn lower_matmul_recursive<B: GpuBackend + Clone>(
     )
 }
 
-pub fn forward_matmul<B: GpuBackend + Clone>(
+pub fn forward_matmul<B: GpuBackend>(
     eval_node: impl Fn(
         NodeId,
         NodeId,
@@ -474,9 +478,9 @@ pub fn forward_matmul<B: GpuBackend + Clone>(
     Ok(deepest)
 }
 
-impl<B: GpuBackend + Clone> Graph<B> {
+impl<B: GpuBackend> Graph<B> {
     pub fn matmul(&mut self, a: NodeId, b: NodeId) -> NodeId {
-        fn save<B: GpuBackend + Clone>(
+        fn save<B: GpuBackend>(
             node_id: NodeId,
             node: &Node<B>,
             graph: &Graph<B>,
@@ -495,7 +499,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
             }
         }
 
-        fn valid_shape<B: GpuBackend + Clone>(
+        fn valid_shape<B: GpuBackend>(
             node_id: NodeId,
             node: &Node<B>,
             graph: &Graph<B>,
@@ -546,7 +550,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                     ctx: GraphErrorContext::ShapeMismatch {
                         node: node_id,
                         all_hand_sides: vec![a.shape.clone(), b.shape.clone()],
-                        op: node.op.clone(),
+                        op: node.op,
                     },
                 });
             }
@@ -558,7 +562,7 @@ impl<B: GpuBackend + Clone> Graph<B> {
                     ctx: GraphErrorContext::CannotInferShape {
                         node: node_id,
                         all_hand_sides: vec![a.shape.clone(), b.shape.clone()],
-                        op: node.op.clone(),
+                        op: node.op,
                     },
                 });
             }

@@ -2,15 +2,21 @@ use core::cmp::Ordering;
 
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend, backend::{
-            Axis, DType, DispatchOptions, Graph, GraphOp, Metadata, NodeId, Op, Param, ParamId, ParamTy, ValueId, ValueState, kernel::{Dependencies, KernelsChained, LinkedKernel, NodeInput, RawKernel, SaveIndicator},
+        CompilationOptions, GpuBackend,
+        backend::{
+            Axis, DType, DispatchOptions, Graph, GraphOp, Metadata, NodeId, Op, Param, ParamId,
+            ParamTy, ValueId, ValueState,
+            kernel::{
+                Dependencies, KernelsChained, LinkedKernel, NodeInput, RawKernel, SaveIndicator,
+            },
         },
-    }, errors::{Error, ErrorKind},
+    },
+    errors::{Error, ErrorKind},
 };
 use alloc::{vec, vec::Vec};
 
 #[inline]
-pub fn lower_forward<B: GpuBackend + Clone>(
+pub fn lower_forward<B: GpuBackend>(
     graph: &Graph<B>,
     meta: Metadata,
     saved: &[SaveIndicator],
@@ -146,7 +152,9 @@ pub fn lower_forward<B: GpuBackend + Clone>(
             kernel.raw.update_var_state(total, ValueState::Mut);
 
             if dims.len() > 1 {
-                let gid2 = kernel.raw.def_var(DType::UnsignedInt, ValueState::Mut, None);
+                let gid2 = kernel
+                    .raw
+                    .def_var(DType::UnsignedInt, ValueState::Mut, None);
 
                 for (i, &d) in dims.iter().enumerate().skip(1) {
                     kernel.raw.overwrite_var(
@@ -157,7 +165,9 @@ pub fn lower_forward<B: GpuBackend + Clone>(
                     );
 
                     if i >= 2 {
-                        kernel.raw.overwrite_var(gid2, Op::Mul { a: total, b: gid2 });
+                        kernel
+                            .raw
+                            .overwrite_var(gid2, Op::Mul { a: total, b: gid2 });
 
                         if i == 2 {
                             kernel.raw.update_var_state(base, ValueState::Masked);
@@ -252,10 +262,7 @@ pub fn lower_forward<B: GpuBackend + Clone>(
         }
     }
 
-    Ok(KernelsChained {
-        kernels,
-        params,
-    })
+    Ok(KernelsChained { kernels, params })
 }
 
 #[inline]
@@ -273,7 +280,7 @@ fn ensure_param_slot(
     })
 }
 
-fn eval_node<B: GpuBackend + Clone>(
+fn eval_node<B: GpuBackend>(
     root: NodeId,
     input: NodeId,
     node_id: &NodeInput,
@@ -319,7 +326,9 @@ fn eval_node<B: GpuBackend + Clone>(
                 ctx: (),
             })?;
 
-            kernel.raw.overwrite_var(out, Op::ParamLoad { param, index: idx });
+            kernel
+                .raw
+                .overwrite_var(out, Op::ParamLoad { param, index: idx });
             kernel.register_param(param);
         }
 
@@ -363,7 +372,9 @@ fn eval_node<B: GpuBackend + Clone>(
                     kind: ErrorKind::ParamNotMaterialized,
                     ctx: (),
                 })?;
-                kernel.raw.overwrite_var(out, Op::ParamLoad { param, index: idx });
+                kernel
+                    .raw
+                    .overwrite_var(out, Op::ParamLoad { param, index: idx });
 
                 kernel.register_param(param);
 

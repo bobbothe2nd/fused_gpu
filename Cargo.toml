@@ -22,8 +22,7 @@ debug = false
 [features]
 default = ["wgsl", "standard_ops"]
 
-std = []
-wgsl = ["std", "dep:wgpu"]
+wgsl = ["dep:wgpu"]
 standard_ops = []
 
 [[example]]
@@ -38,6 +37,7 @@ required-features = ["standard_ops", "wgsl"]
 briny = "0.4.1"
 
 [dev-dependencies]
+gpu_telemetry = "0.1.0"
 pollster = "0.4.0"
 
 [target.'cfg(target_family = "windows")'.dependencies.wgpu]

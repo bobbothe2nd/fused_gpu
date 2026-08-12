@@ -196,7 +196,7 @@ impl KernelsChained {
     }
 
     /// Lowers an execution graph into kernels.
-    pub fn lower<B: GpuBackend + Clone>(
+    pub fn lower<B: GpuBackend>(
         graph: &Graph<B>,
         meta: Metadata,
         saved: &[SaveIndicator],
@@ -258,7 +258,11 @@ macro_rules! impl_control_flow {
                 ret
             }
 
-            pub fn push_while_loop<F: FnOnce(&mut Self) -> R, R>(&mut self, cond: Op, content: F) -> R {
+            pub fn push_while_loop<F: FnOnce(&mut Self) -> R, R>(
+                &mut self,
+                cond: Op,
+                content: F,
+            ) -> R {
                 self.raw.ops.push(Op::WhileLoopBegin {
                     cond: Box::new(cond),
                 });
@@ -359,8 +363,9 @@ impl Kernel {
     pub fn update_param_dtype(&mut self, id: ValueId, dtype: DType) {
         self.params[id].dtype = dtype;
     }
-    
-    fn register_param(&mut self, _id: ParamId) {}
+
+    #[allow(clippy::needless_pass_by_ref_mut, clippy::unused_self)]
+    const fn register_param(&mut self, _id: ParamId) {}
 }
 
 #[derive(Debug)]
