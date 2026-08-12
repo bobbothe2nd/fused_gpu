@@ -11,17 +11,17 @@ use crate::{
 };
 use alloc::{format, vec, vec::Vec};
 
-pub fn lower_matmul_recursive<B: GpuBackend>(
+pub fn lower_matmul_recursive<'a, B: GpuBackend>(
     eval_node: impl Fn(
         NodeId,
         NodeId,
         &NodeInput,
         ValueId,
         &mut Vec<NodeId>,
-        &Graph<B>,
+        &'a Graph<'a, B>,
         &[Option<ParamId>],
         &[Option<ParamId>],
-        &mut LinkedKernel,
+        &mut LinkedKernel<'a, B>,
         ValueId,
         ValueId,
         ValueId,
@@ -36,11 +36,11 @@ pub fn lower_matmul_recursive<B: GpuBackend>(
     resolved: &mut Vec<NodeId>,
     backwardness: Option<u8>,
     node_id: NodeId,
-    graph: &Graph<B>,
+    graph: &'a Graph<'a, B>,
     out: ValueId,
     node_params: &[Option<ParamId>],
     saved_params: &[Option<ParamId>],
-    kernel: &mut LinkedKernel,
+    kernel: &mut LinkedKernel<'a, B>,
     base: ValueId,
     _idx: ValueId,
     local_row: ValueId,
@@ -113,12 +113,20 @@ pub fn lower_matmul_recursive<B: GpuBackend>(
         b_node_shape.swap(len - 1, len - 2);
     }
 
+    let m = a_node_shape[a_node_shape.len() - 2];
+    let n = b_node_shape[b_node_shape.len() - 1];
+    let k = a_node_shape[a_node_shape.len() - 1];
+
+    kernel.register_meta(m);
+    kernel.register_meta(n);
+    kernel.register_meta(k);
+
     let m = kernel.raw.def_var(
         DType::UnsignedInt,
         ValueState::Immut,
         Some(Op::ReadMeta {
             param: 0,
-            field: a_node_shape[a_node_shape.len() - 2],
+            field: m,
         }),
     );
     let n = kernel.raw.def_var(
@@ -126,7 +134,7 @@ pub fn lower_matmul_recursive<B: GpuBackend>(
         ValueState::Immut,
         Some(Op::ReadMeta {
             param: 0,
-            field: b_node_shape[b_node_shape.len() - 1],
+            field: n,
         }),
     );
     let k = kernel.raw.def_var(
@@ -134,7 +142,7 @@ pub fn lower_matmul_recursive<B: GpuBackend>(
         ValueState::Immut,
         Some(Op::ReadMeta {
             param: 0,
-            field: a_node_shape[a_node_shape.len() - 1],
+            field: k,
         }),
     );
 
@@ -170,17 +178,17 @@ pub fn lower_matmul_recursive<B: GpuBackend>(
     )
 }
 
-pub fn forward_matmul<B: GpuBackend>(
+pub fn forward_matmul<'a, B: GpuBackend>(
     eval_node: impl Fn(
         NodeId,
         NodeId,
         &NodeInput,
         ValueId,
         &mut Vec<NodeId>,
-        &Graph<B>,
+        &'a Graph<'a, B>,
         &[Option<ParamId>],
         &[Option<ParamId>],
-        &mut LinkedKernel,
+        &mut LinkedKernel<'a, B>,
         ValueId,
         ValueId,
         ValueId,
@@ -200,11 +208,11 @@ pub fn forward_matmul<B: GpuBackend>(
     swap_b: bool,
     a_node: &NodeInput,
     b_node: &NodeInput,
-    graph: &Graph<B>,
+    graph: &'a Graph<'a, B>,
     out: ValueId,
     node_params: &[Option<ParamId>],
     saved_params: &[Option<ParamId>],
-    kernel: &mut LinkedKernel,
+    kernel: &mut LinkedKernel<'a, B>,
     base: ValueId,
     row: ValueId,
     col: ValueId,
@@ -478,12 +486,12 @@ pub fn forward_matmul<B: GpuBackend>(
     Ok(deepest)
 }
 
-impl<B: GpuBackend> Graph<B> {
+impl<'a, B: GpuBackend> Graph<'a, B> {
     pub fn matmul(&mut self, a: NodeId, b: NodeId) -> NodeId {
         fn save<B: GpuBackend>(
             node_id: NodeId,
-            node: &Node<B>,
-            graph: &Graph<B>,
+            node: &Node<'_, B>,
+            graph: &Graph<'_, B>,
             saved: &mut [SaveIndicator],
         ) {
             saved[node_id] |= SaveIndicator::DEFINED_IN_FORWARD
@@ -499,11 +507,11 @@ impl<B: GpuBackend> Graph<B> {
             }
         }
 
-        fn valid_shape<B: GpuBackend>(
+        fn valid_shape<'a, B: GpuBackend>(
             node_id: NodeId,
-            node: &Node<B>,
-            graph: &Graph<B>,
-            errors: &mut Vec<Error<GraphErrorContext<B>>>,
+            node: &Node<'a, B>,
+            graph: &Graph<'a, B>,
+            errors: &mut Vec<Error<GraphErrorContext<'a, B>>>,
         ) {
             if node.inputs.len() != 2 {
                 errors.push(Error {

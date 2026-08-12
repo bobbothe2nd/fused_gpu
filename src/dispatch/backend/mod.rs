@@ -12,7 +12,7 @@ use crate::{
     errors::{Error, ErrorKind, GraphErrorContext},
 };
 
-#[cfg(feature = "standard_ops")]
+#[cfg(feature = "std")]
 mod std_lib;
 
 pub mod kernel;
@@ -76,6 +76,8 @@ impl GpuBackend for NopGpuContext {
     type SubmissionIndex = ();
     type Schedule<'a> = ();
     type SyncSubmissions = ();
+    type Batcher<'a> = ();
+    type BatchState = ();
 
     const TARGET_SPEC: TargetCompilationOptions<Self> =
         TargetCompilationOptions::new(false, false, false);
@@ -113,15 +115,25 @@ impl GpuBackend for NopGpuContext {
         })
     }
 
-    fn launch_kernel(
+    fn dispatch_kernel(
         &self,
+        _batcher: &mut Self::Batcher<'_>,
         _kernel: &Self::Kernel,
         _wg: [u32; 3],
         _bindings: &[&Self::Buffer],
-    ) -> Self::SyncSubmissions {
-    }
+    ) {}
 
-    fn launch_schedule(&self, _schedule: &Self::Schedule<'_>) {}
+    fn dispatch_schedule(
+        &self,
+        _batcher: &mut Self::Batcher<'_>,
+        _schedule: &Self::Schedule<'_>
+    ) {}
+
+    fn encode(&self, _state: Self::BatchState) -> Self::SyncSubmissions {}
+
+    fn prepare_batch(&self) -> Self::BatchState {}
+
+    fn start_batch<'a>(&self, _state: &'a mut Self::BatchState) -> Self::Batcher<'a> {}
 
     fn schedule<'a>(
         &self,
@@ -534,14 +546,14 @@ pub enum Op {
 }
 
 #[derive(Debug)]
-pub struct Node<B: GpuBackend = GpuContext> {
-    pub op: GraphOp<B>,
+pub struct Node<'a, B: GpuBackend = GpuContext> {
+    pub op: GraphOp<'a, B>,
     pub inputs: Vec<NodeId>,
     pub outputs: Vec<NodeId>,
     pub shape: Vec<MetaId>,
 }
 
-impl<B: GpuBackend> Clone for Node<B> {
+impl<B: GpuBackend> Clone for Node<'_, B> {
     fn clone(&self) -> Self {
         Self {
             op: self.op,
@@ -656,7 +668,7 @@ impl PartialOrd for DispatchOptions {
 
 #[non_exhaustive]
 #[derive(Debug)]
-pub enum GraphOp<B: GpuBackend = GpuContext> {
+pub enum GraphOp<'a, B: GpuBackend = GpuContext> {
     Input,
     ConstF32(f32),
 
@@ -668,10 +680,10 @@ pub enum GraphOp<B: GpuBackend = GpuContext> {
                 &NodeInput,
                 ValueId,
                 &mut Vec<NodeId>,
-                &Graph<B>,
+                &'a Graph<'a, B>,
                 &[Option<ParamId>],
                 &[Option<ParamId>],
-                &mut LinkedKernel,
+                &mut LinkedKernel<'a, B>,
                 ValueId,
                 ValueId,
                 ValueId,
@@ -686,11 +698,11 @@ pub enum GraphOp<B: GpuBackend = GpuContext> {
             &mut Vec<NodeId>,
             Option<u8>,
             NodeId,
-            &Graph<B>,
+            &'a Graph<'a, B>,
             ValueId,
             &[Option<ParamId>],
             &[Option<ParamId>],
-            &mut LinkedKernel,
+            &mut LinkedKernel<'a, B>,
             ValueId,
             ValueId,
             ValueId,
@@ -701,8 +713,8 @@ pub enum GraphOp<B: GpuBackend = GpuContext> {
             &CompilationOptions<B>,
         ) -> Result<Vec<NodeId>, Error>,
         display: fn(&[Vec<MetaId>]) -> String,
-        save: fn(NodeId, &Node<B>, &Graph<B>, &mut [SaveIndicator]),
-        valid_shape: fn(NodeId, &Node<B>, &Graph<B>, &mut Vec<Error<GraphErrorContext<B>>>),
+        save: fn(NodeId, &Node<'_, B>, &Graph<'_, B>, &mut [SaveIndicator]),
+        valid_shape: fn(NodeId, &Node<'a, B>, &Graph<'a, B>, &mut Vec<Error<GraphErrorContext<'a, B>>>),
         arity: u8,
         need_dims: bool,
         stable_iter: bool,
@@ -713,15 +725,15 @@ pub enum GraphOp<B: GpuBackend = GpuContext> {
     },
 }
 
-impl<B: GpuBackend> Copy for GraphOp<B> {}
+impl<B: GpuBackend> Copy for GraphOp<'_, B> {}
 
-impl<B: GpuBackend> Clone for GraphOp<B> {
+impl<B: GpuBackend> Clone for GraphOp<'_, B> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<B: GpuBackend> GraphOp<B> {
+impl<B: GpuBackend> GraphOp<'_, B> {
     #[inline]
     #[must_use]
     pub const fn is_elementwise(&self) -> bool {
@@ -930,7 +942,7 @@ fn check_metadata<B: GpuBackend>(
     }
 }
 
-fn check_shapes<B: GpuBackend>(graph: &Graph<B>, errors: &mut Vec<Error<GraphErrorContext<B>>>) {
+fn check_shapes<'a, B: GpuBackend>(graph: &Graph<'a, B>, errors: &mut Vec<Error<GraphErrorContext<'a, B>>>) {
     for (node_id, node) in graph.nodes.iter().enumerate() {
         if node.shape.len() < 2 && !node.op.is_leaf() {
             errors.push(Error {
@@ -967,12 +979,12 @@ fn check_shapes<B: GpuBackend>(graph: &Graph<B>, errors: &mut Vec<Error<GraphErr
 }
 
 #[derive(Debug)]
-pub struct Graph<B: GpuBackend = GpuContext> {
-    pub(crate) nodes: Vec<Node<B>>,
+pub struct Graph<'a, B: GpuBackend = GpuContext> {
+    pub(crate) nodes: Vec<Node<'a, B>>,
     pub(crate) loss: LossType,
 }
 
-impl<B: GpuBackend> Graph<B> {
+impl<'a, B: GpuBackend> Graph<'a, B> {
     #[must_use]
     pub const fn new(loss: LossType) -> Self {
         Self {
@@ -1026,7 +1038,7 @@ impl<B: GpuBackend> Graph<B> {
         user_inputs.iter().position(|input| *input == node)
     }
 
-    pub fn topo_sort(&mut self) -> Result<(), Error<GraphErrorContext<B>>> {
+    pub fn topo_sort<'b>(&'b mut self) -> Result<(), Error<GraphErrorContext<'a, B>>> {
         let n = self.nodes.len();
 
         let mut in_degree = vec![0usize; n];
@@ -1135,7 +1147,7 @@ impl<B: GpuBackend> Graph<B> {
     ///
     /// It is recommended that you run this function on your graph at least in debug mode, or
     /// you could have panics in production code.
-    pub fn validate(&self, meta: Metadata) -> Result<(), Vec<Error<GraphErrorContext<B>>>> {
+    pub fn validate(&self, meta: Metadata) -> Result<(), Vec<Error<GraphErrorContext<'a, B>>>> {
         let mut errors = Vec::new();
 
         check_acrylicity(self, &mut errors);
@@ -1151,15 +1163,15 @@ impl<B: GpuBackend> Graph<B> {
     }
 
     pub fn lower(
-        &self,
+        &'a self,
         meta: Metadata,
         options: &CompilationOptions<B>,
         saved: &[SaveIndicator],
-    ) -> Result<KernelGroup, Error> {
+    ) -> Result<KernelGroup<'a, B>, Error> {
         KernelsChained::lower(self, meta, saved, options)
     }
 
-    fn add_node(&mut self, op: GraphOp<B>, inputs: Vec<NodeId>, shape: Vec<MetaId>) -> NodeId {
+    fn add_node(&mut self, op: GraphOp<'a, B>, inputs: Vec<NodeId>, shape: Vec<MetaId>) -> NodeId {
         let id = self.nodes.len();
 
         for node_id in &inputs {

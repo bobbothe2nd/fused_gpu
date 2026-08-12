@@ -22,7 +22,6 @@
 #![forbid(clippy::expect_used)]
 #![forbid(clippy::panic)]
 #![forbid(unsafe_code)]
-// #![forbid(missing_docs)]
 #![no_std]
 
 extern crate alloc;

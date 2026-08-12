@@ -16,13 +16,13 @@ use crate::{
 use alloc::{vec, vec::Vec};
 
 #[inline]
-pub fn lower_forward<B: GpuBackend>(
-    graph: &Graph<B>,
+pub fn lower_forward<'a, B: GpuBackend>(
+    graph: &'a Graph<'a, B>,
     meta: Metadata,
     saved: &[SaveIndicator],
     options: &CompilationOptions<B>,
-) -> Result<KernelsChained, Error> {
-    let mut kernels: Vec<Dependencies<LinkedKernel>> = Vec::new();
+) -> Result<KernelsChained<'a, B>, Error> {
+    let mut kernels: Vec<Dependencies<LinkedKernel<'a, B>>> = Vec::new();
 
     let mut roots = Vec::new();
 
@@ -115,6 +115,8 @@ pub fn lower_forward<B: GpuBackend>(
                     iter_space: root_node.shape.clone(),
                 },
                 params: vec![false; params.len()],
+                meta: vec![false; meta.fields],
+                ops: Vec::new(),
             };
 
             kernel.register_param(0);
@@ -132,6 +134,8 @@ pub fn lower_forward<B: GpuBackend>(
                         field: meta_index,
                     }),
                 );
+
+                kernel.register_meta(meta_index);
 
                 dims.push(dim_val);
             }
@@ -280,16 +284,16 @@ fn ensure_param_slot(
     })
 }
 
-fn eval_node<B: GpuBackend>(
+fn eval_node<'a, B: GpuBackend>(
     root: NodeId,
     input: NodeId,
     node_id: &NodeInput,
     out: ValueId,
     resolved: &mut Vec<NodeId>,
-    graph: &Graph<B>,
+    graph: &'a Graph<'a, B>,
     node_params: &[Option<ParamId>],
     saved_params: &[Option<ParamId>],
-    kernel: &mut LinkedKernel,
+    kernel: &mut LinkedKernel<'a, B>,
     idx: ValueId,
     base: ValueId,
     local_row: ValueId,
@@ -309,6 +313,8 @@ fn eval_node<B: GpuBackend>(
             });
         }
     };
+
+    kernel.ops.push(&graph.nodes[node_id].op);
 
     let node = &graph.nodes[node_id];
 

@@ -1,11 +1,11 @@
 //! Safe error handling for all possibilities.
 
 use alloc::vec::Vec;
-use core::error::Error as CoreError;
-use core::fmt::{Debug, Display, Formatter, Result};
+use core::{fmt::{Debug, Display, Formatter, Result}, error::Error as CoreError};
+use crate::dispatch::{backend::{GpuContext, GraphOp, MetaId, NodeId}, GpuBackend};
 
-use crate::dispatch::GpuBackend;
-use crate::dispatch::backend::{GpuContext, GraphOp, MetaId, NodeId};
+#[cfg(feature = "telemetry")]
+use gpu_telemetry::errors::{self, ErrorKind as TelemetryErrorKind};
 
 /// Generic error type with message, type, and display.
 #[derive(Clone)]
@@ -15,7 +15,7 @@ pub struct Error<C = ()> {
     pub ctx: C,
 }
 
-impl core::error::Error for Error {}
+impl CoreError for Error {}
 
 impl<C: Debug> Debug for Error<C> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
@@ -37,7 +37,7 @@ impl Display for Error {
     }
 }
 
-impl<B: GpuBackend + Clone> Display for Error<GraphErrorContext<B>> {
+impl<B: GpuBackend + Clone> Display for Error<GraphErrorContext<'_, B>> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         debug_assert_eq!(self.kind, ErrorKind::ComputeGraphError);
 
@@ -45,41 +45,53 @@ impl<B: GpuBackend + Clone> Display for Error<GraphErrorContext<B>> {
     }
 }
 
+#[cfg(feature = "telemetry")]
+impl From<gpu_telemetry::errors::Error> for Error {
+    fn from(value: errors::Error) -> Self {
+        let kind = match value.kind {
+            TelemetryErrorKind::FailedAdapterCreation => ErrorKind::FailedAdapterCreation,
+            TelemetryErrorKind::FailedEventCreation => ErrorKind::FailedEventCreation,
+            TelemetryErrorKind::FailedInfoQuery => ErrorKind::FailedInfoQuery,
+            TelemetryErrorKind::InvalidEventHandle => ErrorKind::InvalidEventHandle,
+            TelemetryErrorKind::InvalidInterval => ErrorKind::InvalidInterval,
+            TelemetryErrorKind::SyncError => ErrorKind::SyncError,
+            TelemetryErrorKind::UnsupportedFeature => ErrorKind::UnsupportedFeature,
+            TelemetryErrorKind::WaitFailed => ErrorKind::WaitFailed,
+        };
+
+        Self {
+            msg: value.msg,
+            kind,
+            ctx: (),
+        }
+    }
+}
+
 /// Generic error type for all possiblities within `fused_gpu`.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
-    /// An environment was not properly setup before use.
     EnvNotSet,
-
-    /// A particular threshold was exceeded.
     LimitsExceeded,
-
-    /// A feature was used that isn't supported.
     UnsupportedFeature,
-
-    /// GPU adapter not found.
     AdapterNotFound,
-
-    /// GPU device not found.
     DeviceNotFound,
-
-    /// Kernel IR could not load input.
     ParamNotMaterialized,
-
     GraphEmpty,
-
     InvalidDType,
-
     UnresolvedInput,
-
     UnresolvedOutput,
-
     InvalidArgument,
-
     ComputeGraphError,
+    FailedBufferCopy,
 
-    FailedDownload,
+    SyncError,
+    InvalidInterval,
+    InvalidEventHandle,
+    WaitFailed,
+    FailedAdapterCreation,
+    FailedEventCreation,
+    FailedInfoQuery,
 }
 
 impl Display for ErrorKind {
@@ -97,13 +109,20 @@ impl Display for ErrorKind {
             Self::UnresolvedOutput => write!(f, "unresolved output"),
             Self::InvalidArgument => write!(f, "invalid argument"),
             Self::ComputeGraphError => write!(f, "compute graph error"),
-            Self::FailedDownload => write!(f, "failed GPU buffer download"),
+            Self::FailedBufferCopy => write!(f, "failed to copy GPU buffers"),
+            Self::FailedAdapterCreation => write!(f, "failed adapter creation"),
+            Self::FailedEventCreation => write!(f, "failed event creation"),
+            Self::FailedInfoQuery => write!(f, "failed info query"),
+            Self::InvalidEventHandle => write!(f, "invalid event handle"),
+            Self::InvalidInterval => write!(f, "invalid interval"),
+            Self::SyncError => write!(f, "synchronization error"),
+            Self::WaitFailed => write!(f, "wait failed"),
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub enum GraphErrorContext<B: GpuBackend = GpuContext> {
+pub enum GraphErrorContext<'a, B: GpuBackend = GpuContext> {
     CycleDetected {
         node: NodeId,
         path: Vec<NodeId>,
@@ -123,7 +142,7 @@ pub enum GraphErrorContext<B: GpuBackend = GpuContext> {
     ShapeMismatch {
         node: NodeId,
         all_hand_sides: Vec<Vec<MetaId>>,
-        op: GraphOp<B>,
+        op: GraphOp<'a, B>,
     },
 
     RankMismatch {
@@ -151,11 +170,11 @@ pub enum GraphErrorContext<B: GpuBackend = GpuContext> {
     CannotInferShape {
         node: NodeId,
         all_hand_sides: Vec<Vec<MetaId>>,
-        op: GraphOp<B>,
+        op: GraphOp<'a, B>,
     },
 }
 
-impl<B: GpuBackend + Clone> Display for GraphErrorContext<B> {
+impl<B: GpuBackend + Clone> Display for GraphErrorContext<'_, B> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         match self {
             Self::CycleDetected { node, path } => {
@@ -229,4 +248,4 @@ impl<B: GpuBackend + Clone> Display for GraphErrorContext<B> {
     }
 }
 
-impl<B: GpuBackend + Clone + Debug> CoreError for GraphErrorContext<B> {}
+impl<B: GpuBackend + Clone + Debug> CoreError for GraphErrorContext<'_, B> {}

@@ -5,7 +5,7 @@ use crate::dispatch::{
         kernel::{Kernel, RawKernel},
     },
 };
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 #[inline]
 pub fn lower_loss<B: GpuBackend>(graph: &Graph<B>, meta: Metadata) -> Kernel {
@@ -23,6 +23,7 @@ pub fn lower_loss<B: GpuBackend>(graph: &Graph<B>, meta: Metadata) -> Kernel {
             iter_space: root_node.shape.clone(),
         },
         params: Vec::new(),
+        meta: vec![false; meta.fields],
     };
 
     if graph
@@ -80,6 +81,8 @@ pub fn lower_loss<B: GpuBackend>(graph: &Graph<B>, meta: Metadata) -> Kernel {
                 field: meta_index,
             }),
         );
+
+        kernel.register_meta(meta_index);
 
         dims.push(dim_val);
     }
@@ -152,8 +155,8 @@ pub fn lower_loss<B: GpuBackend>(graph: &Graph<B>, meta: Metadata) -> Kernel {
         col,
     );
 
-    kernel.param_store(loss_param, gid, loss_val);
-    kernel.param_store(grad_param, gid, grad_val);
+    kernel.raw.param_store(loss_param, gid, loss_val);
+    kernel.raw.param_store(grad_param, gid, grad_val);
 
     kernel
 }

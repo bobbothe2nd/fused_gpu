@@ -11,7 +11,7 @@ fn mul_add_forward_backward() {
     let m = meta.new_field();
     let n = meta.new_field();
 
-    let mut graph = Graph::new(LossType::LOSS_MSE);
+    let mut graph = Graph::new(LossType::MEAN_SQUARED_ERROR);
     let a = graph.input(&[m, n]);
     let b = graph.input(&[m, n]);
     let c = graph.input(&[m, n]);
@@ -22,7 +22,7 @@ fn mul_add_forward_backward() {
     let saved = KernelsChained::compute_saved_nodes(&graph);
     let options = CompilationOptions::default();
 
-    let ctx = pollster::block_on(GpuContext::new()).unwrap();
+    let ctx = GpuContext::new().unwrap();
     graph.validate(meta).unwrap();
     graph.topo_sort().unwrap();
     graph.rebuild_outputs();
@@ -44,11 +44,18 @@ fn mul_add_forward_backward() {
 
     let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
 
-    ctx.launch_forward(&schedule);
+    let mut state = ctx.prepare_batch();
+    
+    {
+        let mut pass = ctx.start_batch(&mut state);
+
+        pass.dispatch_forward(&schedule);
+        pass.dispatch_backward(&schedule);
+    }
 
     upload.sync();
 
-    ctx.launch_backward(&schedule);
+    state.encode().submit().sync();
 
     let mut dst = [0_f32; 1024];
 
@@ -75,7 +82,7 @@ fn matmul_sub_softmax_forward_backward() {
     let n = meta.new_field();
     let k = meta.new_field();
 
-    let mut graph = Graph::new(LossType::LOSS_CROSS_ENTROPY);
+    let mut graph = Graph::new(LossType::CROSS_ENTROPY);
     let a = graph.input(&[m, k]);
     let b = graph.input(&[k, n]);
     let c = graph.input(&[m, n]);
@@ -87,7 +94,7 @@ fn matmul_sub_softmax_forward_backward() {
     let saved = KernelsChained::compute_saved_nodes(&graph);
     let options = CompilationOptions::default();
 
-    let ctx = pollster::block_on(GpuContext::new()).unwrap();
+    let ctx = GpuContext::new().unwrap();
     graph.validate(meta).unwrap();
     graph.topo_sort().unwrap();
     graph.rebuild_outputs();
@@ -109,11 +116,18 @@ fn matmul_sub_softmax_forward_backward() {
 
     let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
 
-    ctx.launch_forward(&schedule);
+    let mut state = ctx.prepare_batch();
+    
+    {
+        let mut pass = ctx.start_batch(&mut state);
+
+        pass.dispatch_forward(&schedule);
+        pass.dispatch_backward(&schedule);
+    }
 
     upload.sync();
 
-    ctx.launch_backward(&schedule);
+    state.encode().submit().sync();
 
     let mut dst = [0_f32; 2048];
 
@@ -146,7 +160,7 @@ fn div_const_softmax_forward_backward() {
     let m = meta.new_field();
     let n = meta.new_field();
 
-    let mut graph = Graph::new(LossType::LOSS_CROSS_ENTROPY);
+    let mut graph = Graph::new(LossType::CROSS_ENTROPY);
     let x = graph.input(&[m, n]);
 
     let two = graph.constant_f32(2.0);
@@ -156,7 +170,7 @@ fn div_const_softmax_forward_backward() {
     let saved = KernelsChained::compute_saved_nodes(&graph);
     let options = CompilationOptions::default();
 
-    let ctx = pollster::block_on(GpuContext::new()).unwrap();
+    let ctx = GpuContext::new().unwrap();
     graph.validate(meta).unwrap();
     graph.topo_sort().unwrap();
     graph.rebuild_outputs();
@@ -174,11 +188,18 @@ fn div_const_softmax_forward_backward() {
 
     let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
 
-    ctx.launch_forward(&schedule);
+    let mut state = ctx.prepare_batch();
+    
+    {
+        let mut pass = ctx.start_batch(&mut state);
+
+        pass.dispatch_forward(&schedule);
+        pass.dispatch_backward(&schedule);
+    }
 
     upload.sync();
 
-    ctx.launch_backward(&schedule);
+    state.encode().submit().sync();
 
     let mut dst = [0_f32; 512];
 
@@ -209,7 +230,7 @@ fn matmul_add_forward_backward() {
     let n = meta.new_field();
     let k = meta.new_field();
 
-    let mut graph = Graph::new(LossType::LOSS_MSE);
+    let mut graph = Graph::new(LossType::MEAN_SQUARED_ERROR);
     let a = graph.input(&[m, k]);
     let b = graph.input(&[k, n]);
     let c = graph.input(&[m, n]);
@@ -220,7 +241,7 @@ fn matmul_add_forward_backward() {
     let saved = KernelsChained::compute_saved_nodes(&graph);
     let options = CompilationOptions::default();
 
-    let ctx = pollster::block_on(GpuContext::new()).unwrap();
+    let ctx = GpuContext::new().unwrap();
     graph.validate(meta).unwrap();
     graph.topo_sort().unwrap();
     graph.rebuild_outputs();
@@ -244,11 +265,18 @@ fn matmul_add_forward_backward() {
 
     let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
 
-    ctx.launch_forward(&schedule);
+    let mut state = ctx.prepare_batch();
+    
+    {
+        let mut pass = ctx.start_batch(&mut state);
+
+        pass.dispatch_forward(&schedule);
+        pass.dispatch_backward(&schedule);
+    }
 
     upload.sync();
 
-    ctx.launch_backward(&schedule);
+    state.encode().submit().sync();
 
     let mut dst = alloc::vec![0_f32; (M * N).max(M * K).max(K * N) as usize];
 
@@ -308,7 +336,7 @@ fn matmul_chain3_forward_backward() {
     let k = meta.new_field();
     let h = meta.new_field();
 
-    let mut graph = Graph::new(LossType::LOSS_MSE);
+    let mut graph = Graph::new(LossType::MEAN_SQUARED_ERROR);
 
     let a = graph.input(&[m, k]);
     let b = graph.input(&[k, n]);
@@ -324,7 +352,7 @@ fn matmul_chain3_forward_backward() {
     let saved = KernelsChained::compute_saved_nodes(&graph);
     let options = CompilationOptions::default();
 
-    let ctx = pollster::block_on(GpuContext::new()).unwrap();
+    let ctx = GpuContext::new().unwrap();
     graph.validate(meta).unwrap();
     graph.topo_sort().unwrap();
     graph.rebuild_outputs();
@@ -350,11 +378,18 @@ fn matmul_chain3_forward_backward() {
 
     let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
 
-    ctx.launch_forward(&schedule);
+    let mut state = ctx.prepare_batch();
+    
+    {
+        let mut pass = ctx.start_batch(&mut state);
+
+        pass.dispatch_forward(&schedule);
+        pass.dispatch_backward(&schedule);
+    }
 
     upload.sync();
 
-    ctx.launch_backward(&schedule);
+    state.encode().submit().sync();
 
     let max_len = in_tensors.iter().map(|x| x.len()).max().unwrap_or(0) as usize;
     let mut dst = alloc::vec![0.0; max_len];
@@ -398,4 +433,126 @@ fn matmul_chain3_forward_backward() {
     ctx.download(&grad_tensors[4], &mut dst).unwrap();
     let download = &dst[..(H * H) as usize];
     assert!(download.iter().all(|x| *x == 1.0));
+}
+
+#[test]
+fn matmul_sub_forward_backward() {
+    const M: u32 = 32;
+    const N: u32 = 64;
+    const K: u32 = 128;
+
+    const A_VAL: f32 = 3.0;
+    const B_VAL: f32 = 2.0;
+    const C_VAL: f32 = 1.0;
+    const D_VAL: f32 = 0.5;
+
+    const X_VAL: f32 = A_VAL * B_VAL * K as f32;
+    const Y_VAL: f32 = C_VAL * D_VAL * K as f32;
+    const Z_VAL: f32 = X_VAL - Y_VAL;
+
+    const A_GRAD: f32 = B_VAL * N as f32;
+    const B_GRAD: f32 = A_VAL * M as f32;
+    const C_GRAD: f32 = -D_VAL * N as f32;
+    const D_GRAD: f32 = -C_VAL * M as f32;
+
+    let mut meta = Metadata::new();
+    let m = meta.new_field();
+    let n = meta.new_field();
+    let k = meta.new_field();
+
+    let mut graph = Graph::new(LossType::MEAN_SQUARED_ERROR);
+
+    let a = graph.input(&[m, k]);
+    let b = graph.input(&[k, n]);
+    let c = graph.input(&[m, k]);
+    let d = graph.input(&[k, n]);
+
+    let x = graph.matmul(a, b);
+    let y = graph.matmul(c, d);
+
+    graph.sub(x, y);
+
+    let saved = KernelsChained::compute_saved_nodes(&graph);
+    let options = CompilationOptions::default();
+
+    let ctx = GpuContext::new().unwrap();
+
+    graph.validate(meta).unwrap();
+    graph.topo_sort().unwrap();
+    graph.rebuild_outputs();
+
+    let ir = graph.lower(meta, &options, &saved).unwrap();
+    let kernels = ctx.compile(&ir, &options).unwrap();
+
+    let in_tensors = [
+        ctx.new_tensor_init(&[M, K], &[A_VAL; (M * K) as usize]),
+        ctx.new_tensor_init(&[K, N], &[B_VAL; (K * N) as usize]),
+        ctx.new_tensor_init(&[M, K], &[C_VAL; (M * K) as usize]),
+        ctx.new_tensor_init(&[K, N], &[D_VAL; (K * N) as usize]),
+    ];
+
+    let meta_binding = [M, N, K];
+    assert!(meta.validate_meta(&meta_binding));
+
+    let saved_tensors = ctx.alloc_tensors(&graph, &saved, &meta_binding);
+
+    let upload = ctx
+        .upload(
+            &saved_tensors.seed,
+            &[1_f32; (M * N) as usize],
+        )
+        .unwrap();
+
+    let schedule =
+        ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
+
+    let mut state = ctx.prepare_batch();
+
+    {
+        let mut pass = ctx.start_batch(&mut state);
+
+        pass.dispatch_forward(&schedule);
+        pass.dispatch_backward(&schedule);
+    }
+
+    upload.sync();
+
+    state.encode().submit().sync();
+
+    let max_len = in_tensors.iter().map(|x| x.len()).max().unwrap_or(0) as usize;
+    let mut dst = alloc::vec![0.0; max_len];
+
+    let out_tensor = &saved_tensors.forward_out;
+    let grad_tensors = &saved_tensors.grad_tensors;
+    let saved_tensors = &saved_tensors.forward_saved;
+
+    ctx.download(&saved_tensors[0], &mut dst).unwrap();
+    let download = &dst[..(M * N) as usize];
+    assert!(download.iter().all(|x| *x == X_VAL));
+
+    ctx.download(&saved_tensors[1], &mut dst).unwrap();
+    let download = &dst[..(M * N) as usize];
+    assert!(download.iter().all(|x| *x == Y_VAL));
+
+    ctx.download(&out_tensor, &mut dst).unwrap();
+    let download = &dst[..(M * N) as usize];
+    assert!(download.iter().all(|x| *x == Z_VAL));
+
+    ctx.download(&grad_tensors[0], &mut dst).unwrap();
+    let download = &dst[..(M * K) as usize];
+    assert!(download.iter().all(|x| *x == A_GRAD));
+
+    ctx.download(&grad_tensors[1], &mut dst).unwrap();
+    let download = &dst[..(K * N) as usize];
+    assert!(download.iter().all(|x| *x == B_GRAD));
+
+    ctx.download(&grad_tensors[2], &mut dst).unwrap();
+    let download = &dst[..(M * K) as usize];
+    assert!(download.iter().all(|x| *x == C_GRAD));
+
+    ctx.download(&grad_tensors[3], &mut dst).unwrap();
+    let download = &dst[..(K * N) as usize];
+    assert!(download.iter().all(|x| *x == D_GRAD));
+
+    // panic!();
 }

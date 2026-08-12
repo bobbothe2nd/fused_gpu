@@ -60,10 +60,10 @@ macro_rules! lower_unary {
             &NodeInput,
             ValueId,
             &mut Vec<NodeId>,
-            &Graph<B>,
+            &'a Graph<'a, B>,
             &[Option<ParamId>],
             &[Option<ParamId>],
-            &mut LinkedKernel,
+            &mut LinkedKernel<'a, B>,
             ValueId,
             ValueId,
             ValueId,
@@ -78,11 +78,11 @@ macro_rules! lower_unary {
         resolved: &mut Vec<NodeId>,
         backwardness: Option<u8>,
         node_id: NodeId,
-        graph: &Graph<B>,
+        graph: &'a Graph<'a, B>,
         out: ValueId,
         node_params: &[Option<ParamId>],
         saved_params: &[Option<ParamId>],
-        kernel: &mut LinkedKernel,
+        kernel: &mut LinkedKernel<'a, B>,
         base: ValueId,
         idx: ValueId,
         local_row: ValueId,
@@ -223,16 +223,16 @@ macro_rules! lower_unary {
     };
 }
 
-impl<B: GpuBackend> Graph<B> {
+impl<'a, B: GpuBackend> Graph<'a, B> {
     pub fn log(&mut self, x: NodeId) -> NodeId {
         self.add_node(
             GraphOp::Custom {
                 lower: lower_unary!(
                     true,
-                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId| kernel
+                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId| kernel
                         .raw
                         .overwrite_var(out, Op::Log { x: inp }),
-                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId, upstream: ValueId| {
+                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId, upstream: ValueId| {
                         kernel.raw.accum_var(
                             out,
                             Op::Div {
@@ -263,10 +263,10 @@ impl<B: GpuBackend> Graph<B> {
             GraphOp::Custom {
                 lower: lower_unary!(
                     true,
-                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId| kernel
+                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId| kernel
                         .raw
                         .overwrite_var(out, Op::Tanh { x: inp }),
-                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId, upstream: ValueId| {
+                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId, upstream: ValueId| {
                         let one = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
@@ -315,7 +315,7 @@ impl<B: GpuBackend> Graph<B> {
             GraphOp::Custom {
                 lower: lower_unary!(
                     true,
-                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId| {
+                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId| {
                         let zero = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
@@ -352,7 +352,7 @@ impl<B: GpuBackend> Graph<B> {
                             },
                         );
                     },
-                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId, upstream: ValueId| {
+                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId, upstream: ValueId| {
                         let zero = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
@@ -414,7 +414,7 @@ impl<B: GpuBackend> Graph<B> {
             GraphOp::Custom {
                 lower: lower_unary!(
                     true,
-                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId| {
+                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId| {
                         let zero = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
@@ -423,7 +423,7 @@ impl<B: GpuBackend> Graph<B> {
 
                         kernel.raw.overwrite_var(out, Op::Max { a: inp, b: zero });
                     },
-                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId, upstream: ValueId| {
+                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId, upstream: ValueId| {
                         let zero = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
@@ -436,8 +436,9 @@ impl<B: GpuBackend> Graph<B> {
                             Some(Op::Ge { a: inp, b: zero }),
                         );
 
-                        kernel.push_if(cond, |kernel| {
+                        let _ = kernel.push_if(cond, |kernel| {
                             kernel.raw.accum_var(out, Op::CopyVar { id: upstream });
+                            Ok(())
                         });
                     },
                 ),
@@ -465,7 +466,7 @@ impl<B: GpuBackend> Graph<B> {
             GraphOp::Custom {
                 lower: lower_unary!(
                     true,
-                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId| {
+                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId| {
                         let gelu_a = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
@@ -552,7 +553,7 @@ impl<B: GpuBackend> Graph<B> {
 
                         tanh_u
                     },
-                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId, upstream: ValueId| {
+                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId, upstream: ValueId| {
                         let half = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
@@ -700,10 +701,10 @@ impl<B: GpuBackend> Graph<B> {
             GraphOp::Custom {
                 lower: lower_unary!(
                     true,
-                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId| kernel
+                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId| kernel
                         .raw
                         .overwrite_var(out, Op::Exp { x: inp }),
-                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId, upstream: ValueId| {
+                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId, upstream: ValueId| {
                         kernel.raw.accum_var(
                             out,
                             Op::Mul {
@@ -734,10 +735,10 @@ impl<B: GpuBackend> Graph<B> {
             GraphOp::Custom {
                 lower: lower_unary!(
                     true,
-                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId| kernel
+                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId| kernel
                         .raw
                         .overwrite_var(out, Op::Abs { x: inp }),
-                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId, upstream: ValueId| {
+                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId, upstream: ValueId| {
                         let zero = kernel.raw.def_var(
                             DType::Float,
                             ValueState::Inline,
@@ -753,21 +754,25 @@ impl<B: GpuBackend> Graph<B> {
                             ValueState::Inline,
                             Some(Op::Ge { a: inp, b: zero }),
                         );
-                        kernel.push_if_else(
+                        let _ = kernel.push_if_else(
                             ge0,
                             |kernel| {
                                 kernel.raw.accum_var(out, Op::CopyVar { id: upstream });
+                                Ok(())
                             },
-                            |kernel: &mut LinkedKernel| {
+                            |kernel: &mut LinkedKernel<'a, B>| {
                                 kernel.push_if_else(
                                     le0,
                                     |kernel| {
                                         kernel.raw.accum_var(out, Op::Neg { x: upstream });
+                                        Ok(())
                                     },
-                                    |kernel: &mut LinkedKernel| {
+                                    |kernel: &mut LinkedKernel<'a, B>| {
                                         kernel.raw.accum_var(out, Op::ConstF32 { value: 0.0 });
+                                        Ok(())
                                     },
-                                );
+                                )?;
+                                Ok(())
                             },
                         );
                     },
@@ -793,10 +798,10 @@ impl<B: GpuBackend> Graph<B> {
             GraphOp::Custom {
                 lower: lower_unary!(
                     false,
-                    |kernel: &mut LinkedKernel, out: ValueId, inp: ValueId| kernel
+                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, inp: ValueId| kernel
                         .raw
                         .overwrite_var(out, Op::Neg { x: inp }),
-                    |kernel: &mut LinkedKernel, out: ValueId, _: ValueId, upstream: ValueId| kernel
+                    |kernel: &mut LinkedKernel<'a, B>, out: ValueId, _: ValueId, upstream: ValueId| kernel
                         .raw
                         .accum_var(out, Op::Neg { x: upstream }),
                 ),

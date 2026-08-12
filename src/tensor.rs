@@ -51,9 +51,12 @@ pub(crate) fn calc_grid(shape: &[u32], block: [u32; 3]) -> [u32; 3] {
     }
 }
 
-// Core compute storage primitive.
-//
-// Actively used in
+/// Core compute storage primitive.
+///
+/// Actively used in all computations, attaching a shape to the generic (and low-level) [`GpuBuffer`].
+///
+/// Can only be constructed through a [`GpuContext`](`crate::dispatch::GpuContext`) because it
+/// requires a buffer to be allocated on the GPU first.
 #[derive(Debug)]
 pub struct Tensor<B: GpuBackend = crate::dispatch::backend::GpuContext> {
     pub(crate) shape: Vec<u32>,

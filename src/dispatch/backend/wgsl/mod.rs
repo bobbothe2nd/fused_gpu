@@ -11,21 +11,10 @@ use crate::{
     tensor::{build_dims, calc_grid},
 };
 use alloc::{string::String, vec::Vec};
-use briny::raw::cast_slice;
+use briny::raw::cast::cast_slice;
 use core::{fmt::Write, num::NonZeroU64};
 use wgpu::{
-    BackendOptions, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry,
-    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType,
-    BufferDescriptor, BufferUsages, CommandBuffer, CommandEncoderDescriptor, ComputePassDescriptor,
-    ComputePipeline, ComputePipelineDescriptor, Device, DeviceDescriptor, Dx12BackendOptions,
-    Dx12Compiler, Dx12SwapchainKind, Dx12UseFrameLatencyWaitableObject, ExperimentalFeatures,
-    Features, ForceShaderModelToken, GlBackendOptions, GlDebugFns, GlFenceBehavior,
-    Gles3MinorVersion, Instance, InstanceDescriptor, InstanceFlags, Limits, MemoryBudgetThresholds,
-    MemoryHints, NoopBackendOptions, PipelineCompilationOptions, PipelineLayout,
-    PipelineLayoutDescriptor, PollType, PowerPreference, Queue, RequestAdapterError,
-    RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource, ShaderStages, SubmissionIndex,
-    Trace,
-    util::{BufferInitDescriptor, DeviceExt},
+    BackendOptions, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, CommandBuffer, CommandEncoder, CommandEncoderDescriptor, ComputePass, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Device, DeviceDescriptor, Dx12BackendOptions, Dx12Compiler, Dx12SwapchainKind, Dx12UseFrameLatencyWaitableObject, ExperimentalFeatures, Features, ForceShaderModelToken, GlBackendOptions, GlDebugFns, GlFenceBehavior, Gles3MinorVersion, Instance, InstanceDescriptor, InstanceFlags, Limits, MemoryBudgetThresholds, MemoryHints, NoopBackendOptions, PipelineCompilationOptions, PipelineLayout, PipelineLayoutDescriptor, PollType, PowerPreference, Queue, RequestAdapterError, RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource, ShaderStages, SubmissionIndex, Trace, util::{BufferInitDescriptor, DeviceExt},
 };
 
 /// WGPU context for device and queue.
@@ -147,6 +136,8 @@ impl GpuBackend for GpuContext {
     type ParamLayout = PipelineLayout;
     type Schedule<'a> = Schedule<'a>;
     type SyncSubmissions = CommandBuffer;
+    type Batcher<'a> = ComputePass<'a>;
+    type BatchState = CommandEncoder;
 
     #[inline]
     fn alloc(&self, len: usize) -> Self::Buffer {
@@ -186,7 +177,7 @@ impl GpuBackend for GpuContext {
         if buffer.size_bytes() as usize != data.len() {
             return Err(Error {
                 msg: "CPU and GPU buffers of unequal sizes during upload",
-                kind: ErrorKind::FailedDownload,
+                kind: ErrorKind::FailedBufferCopy,
                 ctx: (),
             });
         }
@@ -210,7 +201,7 @@ impl GpuBackend for GpuContext {
         if src_size != dst.0.size() {
             return Err(Error {
                 msg: "buffers of unequal sizes during pipe",
-                kind: ErrorKind::FailedDownload,
+                kind: ErrorKind::FailedBufferCopy,
                 ctx: (),
             });
         }
@@ -229,7 +220,7 @@ impl GpuBackend for GpuContext {
         if buffer.size_bytes() as usize > data.len() {
             return Err(Error {
                 msg: "insufficient CPU memory allocated for GPU download",
-                kind: ErrorKind::FailedDownload,
+                kind: ErrorKind::FailedBufferCopy,
                 ctx: (),
             });
         }
@@ -266,7 +257,7 @@ impl GpuBackend for GpuContext {
         data[..len].copy_from_slice(
             &buffer_slice.get_mapped_range().map_err(|_| Error {
                 msg: "failed to map GPU memory to CPU",
-                kind: ErrorKind::FailedDownload,
+                kind: ErrorKind::FailedBufferCopy,
                 ctx: (),
             })?[..len],
         );
@@ -381,73 +372,59 @@ impl GpuBackend for GpuContext {
         }
     }
 
-    fn launch_schedule(&self, schedule: &Self::Schedule<'_>) {
-        let mut encoder = self
+    fn prepare_batch(&self) -> Self::BatchState {
+        self
             .device
             .create_command_encoder(&CommandEncoderDescriptor {
                 label: Some("encoder"),
-            });
-
-        {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("pass"),
-                timestamp_writes: None,
-            });
-
-            for (kernel, wg, bind_group) in &schedule.kernels {
-                pass.set_pipeline(kernel);
-                pass.set_bind_group(0, bind_group, &[]);
-
-                pass.dispatch_workgroups(wg[0], wg[1], wg[2]);
-            }
-        }
-
-        self.queue.submit([encoder.finish()]);
+            })
     }
 
-    #[inline]
-    fn launch_kernel(
-        &self,
-        kernel: &Self::Kernel,
-        wg: [u32; 3],
-        bindings: &[&Self::Buffer],
-    ) -> Self::SyncSubmissions {
-        let mut encoder = self
-            .device
-            .create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("encoder"),
-            });
+    fn start_batch<'a>(&self, encoder: &'a mut Self::BatchState) -> Self::Batcher<'a> {
+        encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("pass"),
+            timestamp_writes: None,
+        })
+    }
 
-        {
-            let kernel = &kernel.kernel;
-
-            let entries = bindings
-                .iter()
-                .enumerate()
-                .map(|(i, x)| BindGroupEntry {
-                    binding: i as u32,
-                    resource: x.0.as_entire_binding(),
-                })
-                .collect::<Vec<_>>();
-
-            let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
-                layout: &kernel.get_bind_group_layout(0),
-                entries: &entries,
-                label: Some("bind_group"),
-            });
-
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("pass"),
-                timestamp_writes: None,
-            });
-
+    fn dispatch_schedule(&self, pass: &mut Self::Batcher<'_>, schedule: &Self::Schedule<'_>) {
+        for (kernel, wg, bind_group) in &schedule.kernels {
             pass.set_pipeline(kernel);
-            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_bind_group(0, bind_group, &[]);
 
             pass.dispatch_workgroups(wg[0], wg[1], wg[2]);
         }
+    }
 
-        encoder.finish()
+    #[inline]
+    fn dispatch_kernel(
+        &self,
+        pass: &mut Self::Batcher<'_>,
+        kernel: &Self::Kernel,
+        wg: [u32; 3],
+        bindings: &[&Self::Buffer],
+    ) {
+        let kernel = &kernel.kernel;
+
+        let entries = bindings
+            .iter()
+            .enumerate()
+            .map(|(i, x)| BindGroupEntry {
+                binding: i as u32,
+                resource: x.0.as_entire_binding(),
+            })
+            .collect::<Vec<_>>();
+
+        let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+            layout: &kernel.get_bind_group_layout(0),
+            entries: &entries,
+            label: Some("bind_group"),
+        });
+
+        pass.set_pipeline(kernel);
+        pass.set_bind_group(0, &bind_group, &[]);
+
+        pass.dispatch_workgroups(wg[0], wg[1], wg[2]);
     }
 
     #[inline]
@@ -456,6 +433,10 @@ impl GpuBackend for GpuContext {
             submission_index: Some(submission_index),
             timeout: None,
         });
+    }
+
+    fn encode(&self, state: Self::BatchState) -> Self::SyncSubmissions {
+        state.finish()
     }
 
     fn submit(&self, submission: Self::SyncSubmissions) -> Self::SubmissionIndex {

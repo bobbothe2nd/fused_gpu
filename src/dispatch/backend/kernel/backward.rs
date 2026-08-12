@@ -16,12 +16,12 @@ use crate::{
 use alloc::{vec, vec::Vec};
 
 #[inline]
-pub fn lower_backward<B: GpuBackend>(
-    graph: &Graph<B>,
+pub fn lower_backward<'a, B: GpuBackend>(
+    graph: &'a Graph<'a, B>,
     meta: Metadata,
     saved: &[SaveIndicator],
     options: &CompilationOptions<B>,
-) -> Result<KernelsChained, Error> {
+) -> Result<KernelsChained<'a, B>, Error> {
     let tile_size = options.opt.tile_size;
 
     let shared_size = tile_size * tile_size;
@@ -83,7 +83,7 @@ pub fn lower_backward<B: GpuBackend>(
         }
     }
 
-    let mut grad_kernels: Vec<Dependencies<LinkedKernel>> = Vec::new();
+    let mut grad_kernels: Vec<Dependencies<LinkedKernel<'a, B>>> = Vec::new();
     let mut kernels = Vec::new();
 
     for input in graph
@@ -217,16 +217,16 @@ pub fn lower_backward<B: GpuBackend>(
     Ok(KernelsChained { kernels, params })
 }
 
-fn eval_grad<B: GpuBackend>(
+fn eval_grad<'a, B: GpuBackend>(
     root: NodeId,
     input: NodeId,
     node_id: &NodeInput,
     upstream: ValueId,
     resolved: &mut Vec<NodeId>,
-    graph: &Graph<B>,
+    graph: &'a Graph<'a, B>,
     node_params: &[Option<ParamId>],
     saved_params: &[Option<ParamId>],
-    kernel: &mut LinkedKernel,
+    kernel: &mut LinkedKernel<'a, B>,
     idx: ValueId,
     base: ValueId,
     local_row: ValueId,
@@ -252,6 +252,8 @@ fn eval_grad<B: GpuBackend>(
             return Ok(Vec::new());
         }
     };
+
+    kernel.ops.push(&graph.nodes[node_id].op);
 
     let mut deepest = Vec::new();
 
@@ -358,13 +360,13 @@ fn eval_grad<B: GpuBackend>(
     Ok(deepest)
 }
 
-fn gen_kernel<B: GpuBackend>(
+fn gen_kernel<'a, B: GpuBackend>(
     meta: Metadata,
     params: &[Param],
     block: [u32; 3],
     input: NodeId,
     root_node: &Node<B>,
-) -> (LinkedKernel, ValueId, ValueId) {
+) -> (LinkedKernel<'a, B>, ValueId, ValueId) {
     let mut kernel = LinkedKernel {
         raw: RawKernel {
             meta,
@@ -376,6 +378,8 @@ fn gen_kernel<B: GpuBackend>(
             iter_space: root_node.shape.clone(),
         },
         params: vec![false; params.len()],
+        meta: vec![false; meta.fields],
+        ops: Vec::new(),
     };
 
     kernel.register_param(0);
@@ -391,6 +395,8 @@ fn gen_kernel<B: GpuBackend>(
                 field: meta_index,
             }),
         );
+
+        kernel.register_meta(meta_index);
 
         dims.push(dim_val);
     }

@@ -4,7 +4,7 @@ use fused_gpu::dispatch::{
     CompilationOptions, GpuContext, Schedule,
     backend::{Graph, LossType, Metadata, kernel::KernelsChained},
 };
-use gpu_telemetry::monitor::GpuMonitor;
+use gpu_telemetry::monitor::{GpuMonitor, telemetry::Telemetry};
 
 fn matmul_chain3_forward_backward() {
     const M: u32 = 16;
@@ -24,7 +24,7 @@ fn matmul_chain3_forward_backward() {
     let k = meta.new_field();
     let h = meta.new_field();
 
-    let mut graph = Graph::new(LossType::LOSS_MSE);
+    let mut graph = Graph::new(LossType::MEAN_SQUARED_ERROR);
 
     let a = graph.input(&[m, k]);
     let b = graph.input(&[k, n]);
@@ -42,7 +42,7 @@ fn matmul_chain3_forward_backward() {
 
     let compile_start = Instant::now();
 
-    let ctx = pollster::block_on(GpuContext::new()).unwrap();
+    let ctx = GpuContext::new().unwrap();
     graph.validate(meta).unwrap();
     graph.topo_sort().unwrap();
     graph.rebuild_outputs();
@@ -78,7 +78,7 @@ fn matmul_chain3_forward_backward() {
 
     let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors);
 
-    let monitor: GpuMonitor = GpuMonitor::start(Duration::from_millis(20)).unwrap();
+    let monitor: GpuMonitor<Telemetry> = GpuMonitor::start(Duration::from_millis(3)).unwrap();
 
     model_runtime(&ctx, &schedule);
 
@@ -119,17 +119,27 @@ fn matmul_chain3_forward_backward() {
 
 fn model_runtime(ctx: &GpuContext, schedule: &Schedule) {
     for iters in [100, 10, 1] {
+        let mut state = ctx.prepare_batch();
+
+        {
+            let mut pass = ctx.start_batch(&mut state);
+
+            for _ in 0..iters {
+                pass.dispatch_forward(schedule);
+
+                pass.dispatch_backward(schedule);
+            }
+        }
+
+        let encoded = state.encode();
+
         let runtime_start = Instant::now();
 
-        for _ in 0..iters {
-            ctx.launch_forward(schedule);
-
-            ctx.launch_backward(schedule);
-        }
+        let _ = encoded.submit().sync();
 
         let runtime_elapsed = runtime_start.elapsed();
 
-        println!("MODEL RUNTIME {iters} TIME: {runtime_elapsed:?} elapsed");
+        println!("MODEL RUNTIME + SYNCHRONIZATION {iters} TIME: {runtime_elapsed:?} elapsed");
     }
 }
 

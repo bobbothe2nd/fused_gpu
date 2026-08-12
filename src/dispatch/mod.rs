@@ -2,17 +2,13 @@
 
 use alloc::{vec, vec::Vec};
 use core::{fmt::Debug, marker::PhantomData};
-
 use crate::{
     dispatch::backend::{
-        Graph, MetaId, NodeId, Param,
-        kernel::{Dependencies, RawKernel, SaveIndicator},
-    },
-    errors::Error,
-    tensor::{Tensor, build_dims},
+        Graph, MetaId, NodeId, Param, kernel::{Dependencies, RawKernel, SaveIndicator},
+    }, errors::Error, tensor::{Tensor, build_dims},
 };
 use briny::{
-    raw::{slice_to_bytes, slice_to_bytes_mut},
+    raw::cast::{slice_to_bytes, slice_to_bytes_mut},
     traits::Pod,
 };
 
@@ -117,6 +113,8 @@ pub trait GpuBackend: Sized {
 
     type Buffer: GpuBufferBackend;
     type Kernel: GpuKernelBackend;
+    type Batcher<'a>;
+    type BatchState;
     type SubmissionIndex;
     type ParamLayout;
     type Schedule<'a>;
@@ -156,16 +154,27 @@ pub trait GpuBackend: Sized {
         meta: &[u32],
     ) -> Self::Schedule<'a>;
 
-    fn launch_schedule(&self, schedule: &Self::Schedule<'_>);
-
-    fn launch_kernel(
+    fn dispatch_kernel(
         &self,
+        batcher: &mut Self::Batcher<'_>,
         kernel: &Self::Kernel,
         wg: [u32; 3],
         bindings: &[&Self::Buffer],
-    ) -> Self::SyncSubmissions;
+    );
+
+    fn dispatch_schedule(
+        &self,
+        batcher: &mut Self::Batcher<'_>,
+        schedule: &Self::Schedule<'_>
+    );
 
     fn sync(&self, submission_index: Self::SubmissionIndex);
+
+    fn prepare_batch(&self) -> Self::BatchState;
+
+    fn start_batch<'a>(&self, state: &'a mut Self::BatchState) -> Self::Batcher<'a>;
+
+    fn encode(&self, state: Self::BatchState) -> Self::SyncSubmissions;
 
     fn submit(&self, submission: Self::SyncSubmissions) -> Self::SubmissionIndex;
 
@@ -218,7 +227,7 @@ pub struct KernelGroup<'a, B: GpuBackend = backend::GpuContext> {
 
 /// Handle to a series of GPU submissions.
 #[must_use]
-pub struct SubmissionIndex<'a, B: GpuBackend>(B::SubmissionIndex, &'a GpuContext<B>);
+pub struct SubmissionIndex<'a, B: GpuBackend = backend::GpuContext>(B::SubmissionIndex, &'a GpuContext<B>);
 
 impl<B: GpuBackend> SubmissionIndex<'_, B> {
     pub fn sync(self) {
@@ -228,11 +237,20 @@ impl<B: GpuBackend> SubmissionIndex<'_, B> {
 
 /// Handle to a series of unsubmitted GPU kernels.
 #[must_use]
-pub struct SyncSubmission<'a, B: GpuBackend>(B::SyncSubmissions, &'a GpuContext<B>);
+pub struct SyncSubmission<'a, B: GpuBackend = backend::GpuContext>(B::SyncSubmissions, &'a GpuContext<B>);
 
 impl<'a, B: GpuBackend> SyncSubmission<'a, B> {
     pub fn submit(self) -> SubmissionIndex<'a, B> {
         SubmissionIndex(self.1.inner.submit(self.0), self.1)
+    }
+}
+
+#[must_use]
+pub struct BatchState<'a, B: GpuBackend = backend::GpuContext>(B::BatchState, &'a GpuContext<B>);
+
+impl<'a, B: GpuBackend> BatchState<'a, B> {
+    pub fn encode(self) -> SyncSubmission<'a, B> {
+        SyncSubmission(self.1.inner.encode(self.0), self.1)
     }
 }
 
@@ -253,13 +271,25 @@ pub struct GpuContext<B: GpuBackend = backend::GpuContext> {
 }
 
 impl GpuContext<backend::GpuContext> {
+    /// Blocking creation of the context by searching for GPU.
+    ///
+    /// # Errors
+    ///
+    /// Failure is platform-specific and backend-dependent. It is likely a result of
+    /// not finding a supported device. Errors must be handled properly in critical code.
+    pub fn new() -> Result<Self, Error> {
+        Ok(Self {
+            inner: pollster::block_on(backend::GpuContext::new())?,
+        })
+    }
+
     /// Non-blocking creation of the context by searching for GPU.
     ///
     /// # Errors
     ///
     /// Failure is platform-specific and backend-dependent. It is likely a result of
     /// not finding a supported device. Errors must be handled properly in critical code.
-    pub async fn new() -> Result<Self, Error> {
+    pub async fn new_async() -> Result<Self, Error> {
         Ok(Self {
             inner: backend::GpuContext::new().await?,
         })
@@ -429,42 +459,12 @@ impl<B: GpuBackend> GpuContext<B> {
         Schedule { forward, backward }
     }
 
-    /// Launches a forward kernel from the compiled kernels with metadata and tensors.
-    ///
-    /// This function relies on the assumption that tensors matches the graph inputs and
-    /// the metadata matches the graph metadata when compiling.
-    pub fn launch_forward(&self, schedule: &Schedule<'_, B>) {
-        self.inner.launch_schedule(&schedule.forward);
+    pub fn prepare_batch(&self) -> BatchState<'_, B> {
+        BatchState(self.inner.prepare_batch(), self)
     }
 
-    /// Launches a backward kernel from the compiled kernels with metadata and tensors.
-    ///
-    /// This function relies on the assumption that tensors matches the graph inputs and
-    /// the metadata matches the graph metadata when compiling.
-    pub fn launch_backward(&self, schedule: &Schedule<'_, B>) {
-        self.inner.launch_schedule(&schedule.backward);
-    }
-
-    pub fn launch_loss(
-        &self,
-        kernels: &KernelGroup<B>,
-        target: &Tensor<B>,
-        tensors: &AllocTensors<B>,
-    ) -> SyncSubmission<'_, B> {
-        let grid = tensors.loss_t.calc_grid(*kernels.loss.block());
-
-        let bindings = [
-            &tensors.meta,
-            &tensors.loss_t.data.inner,
-            &tensors.seed.data.inner,
-            &tensors.forward_out.data.inner,
-            &target.data.inner,
-        ];
-
-        SyncSubmission(
-            self.inner.launch_kernel(&kernels.loss, grid, &bindings),
-            self,
-        )
+    pub fn start_batch<'a>(&'a self, state: &'a mut BatchState<B>) -> Batcher<'a, B> {
+        Batcher(self.inner.start_batch(&mut state.0), self)
     }
 
     pub fn alloc_tensors(
@@ -548,6 +548,38 @@ impl<B: GpuBackend> GpuContext<B> {
             data,
             shape: vec![indices.len() as u32],
         }
+    }
+}
+
+#[must_use]
+pub struct Batcher<'a, B: GpuBackend = backend::GpuContext>(B::Batcher<'a>, &'a GpuContext<B>);
+
+impl<B: GpuBackend> Batcher<'_, B> {
+    pub fn dispatch_forward(&mut self, schedule: &Schedule<'_, B>) {
+        self.1.inner.dispatch_schedule(&mut self.0, &schedule.forward);
+    }
+
+    pub fn dispatch_backward(&mut self, schedule: &Schedule<'_, B>) {
+        self.1.inner.dispatch_schedule(&mut self.0, &schedule.backward);
+    }
+
+    pub fn launch_loss(
+        &mut self,
+        kernels: &KernelGroup<B>,
+        target: &Tensor<B>,
+        tensors: &AllocTensors<B>,
+    ) {
+        let grid = tensors.loss_t.calc_grid(*kernels.loss.block());
+
+        let bindings = [
+            &tensors.meta,
+            &tensors.loss_t.data.inner,
+            &tensors.seed.data.inner,
+            &tensors.forward_out.data.inner,
+            &target.data.inner,
+        ];
+
+        self.1.inner.dispatch_kernel(&mut self.0, &kernels.loss, grid, &bindings);
     }
 }
 
