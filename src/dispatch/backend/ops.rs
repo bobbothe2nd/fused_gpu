@@ -371,7 +371,7 @@ impl Op {
     }
 
     #[must_use]
-    pub fn writes_to(&self) -> Option<ValueId> {
+    pub const fn writes_to(&self) -> Option<ValueId> {
         match self {
             Self::DefineVar { id }
             | Self::AddAssign { id, .. }

@@ -1,5 +1,6 @@
 use crate::dispatch::{
-    CompilationOptions, GpuBackend, OptFlags, backend::{DType, Op, ValueId, ValueState, kernel::RawKernel},
+    CompilationOptions, GpuBackend, OptFlags,
+    backend::{DType, Op, ValueId, ValueState, kernel::RawKernel},
 };
 use alloc::vec::Vec;
 
@@ -85,9 +86,11 @@ pub fn optimize<B: GpuBackend>(kernel: &mut RawKernel, options: &CompilationOpti
 
             for (a, b, value_id) in divisions {
                 if let Some(Op::ConstF32 { value }) = kernel.values[b].init {
-                    kernel.values[b].init.replace(Op::ConstF32 { value: 1.0 / value });
+                    kernel.values[b]
+                        .init
+                        .replace(Op::ConstF32 { value: 1.0 / value });
 
-                    kernel.values[value_id].init.replace(Op::Mul { a, b, });
+                    kernel.values[value_id].init.replace(Op::Mul { a, b });
                 }
             }
         }
@@ -109,7 +112,10 @@ pub fn optimize<B: GpuBackend>(kernel: &mut RawKernel, options: &CompilationOpti
     }
 }
 
-fn iter_values<R>(kernel: &mut RawKernel, mut f: impl FnMut(&mut Op, ValueId) -> Option<R>) -> Vec<R> {
+fn iter_values<R>(
+    kernel: &mut RawKernel,
+    mut f: impl FnMut(&mut Op, ValueId) -> Option<R>,
+) -> Vec<R> {
     let mut value_ids = Vec::new();
 
     for value_id in 0..kernel.values.len() {
@@ -120,7 +126,8 @@ fn iter_values<R>(kernel: &mut RawKernel, mut f: impl FnMut(&mut Op, ValueId) ->
         }
 
         if let Some(op) = &mut kernel.values[value_id].init
-        && let Some(value) = f(op, value_id) {
+            && let Some(value) = f(op, value_id)
+        {
             value_ids.push(value);
         }
     }

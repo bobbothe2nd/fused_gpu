@@ -5,12 +5,8 @@ use crate::{
     dispatch::{
         CompilationOptions, GpuBackend, GpuBufferBackend, GpuKernelBackend,
         TargetCompilationOptions,
-        backend::{
-            kernel::{
-                Kernel, KernelGroup, KernelsChained, LinkedKernel, NodeInput, RawKernel,
-                SaveIndicator,
-            },
-            ops::Op,
+        backend::kernel::{
+            Kernel, KernelGroup, KernelsChained, LinkedKernel, NodeInput, RawKernel, SaveIndicator,
         },
     },
     errors::{Error, ErrorKind, GraphErrorContext},
@@ -19,12 +15,14 @@ use crate::{
 #[cfg(feature = "std")]
 mod std_lib;
 
-pub mod ops;
-
 pub mod kernel;
 
 #[cfg(feature = "wgsl")]
 pub mod wgsl;
+
+mod ops;
+
+pub use ops::Op;
 
 #[cfg(feature = "wgsl")]
 pub type GpuContext = wgsl::GpuContext;

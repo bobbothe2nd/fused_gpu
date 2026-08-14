@@ -10,9 +10,12 @@ use crate::{
 };
 use alloc::{vec, vec::Vec};
 
-mod backward;
 mod forward;
+
+mod backward;
+
 mod loss;
+
 mod optimize;
 
 /// Forward, backward, and loss kernel IR.
@@ -202,17 +205,17 @@ impl<'a> KernelsChained<'a> {
 
         for kernel in &mut forward.kernels {
             if let Redirect::Unmasked(kernel) = &mut kernel.val {
-                // optimize::optimize(&mut kernel.raw, options);
+                optimize::optimize(&mut kernel.raw, options);
             }
         }
 
         for kernel in &mut backward.kernels {
             if let Redirect::Unmasked(kernel) = &mut kernel.val {
-                // optimize::optimize(&mut kernel.raw, options);
+                optimize::optimize(&mut kernel.raw, options);
             }
         }
 
-        // optimize::optimize(&mut loss.raw, options);
+        optimize::optimize(&mut loss.raw, options);
 
         Ok(KernelGroup {
             forward,
@@ -343,7 +346,10 @@ impl<B: GpuBackend> LinkedKernel<'_, B> {
         let cond = self
             .raw
             .def_var(DType::Bool, ValueState::Inline, Some(cond));
-        self.push_if(cond, |kernel| {
+        let not_cond = self
+            .raw
+            .def_var(DType::Bool, ValueState::Inline, Some(Op::Not { cond }));
+        self.push_if(not_cond, |kernel| {
             kernel.raw.push_break();
             Ok(())
         })?;
@@ -457,10 +463,8 @@ pub struct RawKernel {
 
     pub shared: Vec<SharedAlloc>,
 
-    /// Contains all expressions.
     pub values: Vec<Value>,
 
-    /// Contains all statements.
     pub ops: Vec<Op>,
 
     pub block: [u32; 3],
@@ -517,7 +521,7 @@ impl RawKernel {
     ) -> Result<R, Error> {
         self.ops.push(Op::ForeverLoopBegin);
         let cond = self.def_var(DType::Bool, ValueState::Inline, Some(cond));
-        let not_cond = self.def_var(DType::Bool, ValueState::Inline, Some(Op::Not { cond, }));
+        let not_cond = self.def_var(DType::Bool, ValueState::Inline, Some(Op::Not { cond }));
         self.push_if(not_cond, |kernel| {
             kernel.push_break();
             Ok(())

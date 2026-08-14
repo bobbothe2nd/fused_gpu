@@ -247,37 +247,30 @@ impl GpuBackend for GpuContext {
         });
         encoder.copy_buffer_to_buffer(&buffer.0, 0, &dst, 0, buffer.0.size());
         let submission_index = self.queue.submit(Some(encoder.finish()));
+        let buffer_slice = dst.slice(..);
 
         let (send, recv) = std::sync::mpsc::channel();
-        dst.map_async(wgpu::MapMode::Read, .., move |res| {
+        buffer_slice.map_async(wgpu::MapMode::Read, move |res| {
             if res.is_ok() {
                 let _ = send.send(());
-            } else {
-                std::eprintln!("failed to map: {res:?}");
             }
         });
 
         let _ = self.device.poll(PollType::Wait {
             submission_index: Some(submission_index),
             timeout: None,
-        }).unwrap();
+        });
 
-        let _ = recv.recv().map_err(|_| Error {
-            msg: "could not map intermediate GPU buffer",
-            kind: ErrorKind::FailedBufferCopy,
-            ctx: (),
-        })?;
+        let _ = recv.recv();
 
         let len = data.len().min(buffer.size_bytes() as usize);
 
         data[..len].copy_from_slice(
-            &dst.get_mapped_range(..).map_err(|e| {
-                std::eprintln!("{e:?}");
-                Error {
+            &buffer_slice.get_mapped_range().map_err(|_| Error {
                 msg: "failed to map GPU memory to CPU",
                 kind: ErrorKind::FailedBufferCopy,
                 ctx: (),
-            }})?[..len],
+            })?[..len],
         );
         dst.unmap();
 
@@ -975,7 +968,7 @@ fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &RawKernel
         }
 
         Op::Not { cond } => {
-            let _ = write!(out, "!{}", render_val(*cond, kernel));
+            let _ = write!(out, "!({})", render_val(*cond, kernel));
         }
 
         Op::ParamStore {
