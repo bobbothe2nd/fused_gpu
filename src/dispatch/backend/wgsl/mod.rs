@@ -1,9 +1,14 @@
 use crate::{
     dispatch::{
-        CompilationOptions, GpuBackend, GpuBufferBackend, GpuKernelBackend, PollStatus, TargetCompilationOptions, backend::{
-            Axis, DType, MetaId, NodeId, Op, Param, ParamTy, ValueId, ValueState, kernel::{Dependencies, RawKernel, Redirect},
+        CompilationOptions, GpuBackend, GpuBufferBackend, GpuKernelBackend, PollStatus,
+        TargetCompilationOptions,
+        backend::{
+            Axis, DType, MetaId, NodeId, Op, Param, ParamTy, ValueId, ValueState,
+            kernel::{Dependencies, RawKernel, Redirect},
         },
-    }, errors::{Error, ErrorKind}, tensor::{build_dims, calc_grid},
+    },
+    errors::{Error, ErrorKind},
+    tensor::{build_dims, calc_grid},
 };
 use alloc::{string::String, vec::Vec};
 use briny::raw::cast::cast_slice;
@@ -242,30 +247,37 @@ impl GpuBackend for GpuContext {
         });
         encoder.copy_buffer_to_buffer(&buffer.0, 0, &dst, 0, buffer.0.size());
         let submission_index = self.queue.submit(Some(encoder.finish()));
-        let buffer_slice = dst.slice(..);
 
         let (send, recv) = std::sync::mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |res| {
+        dst.map_async(wgpu::MapMode::Read, .., move |res| {
             if res.is_ok() {
                 let _ = send.send(());
+            } else {
+                std::eprintln!("failed to map: {res:?}");
             }
         });
 
         let _ = self.device.poll(PollType::Wait {
             submission_index: Some(submission_index),
             timeout: None,
-        });
+        }).unwrap();
 
-        let _ = recv.recv();
+        let _ = recv.recv().map_err(|_| Error {
+            msg: "could not map intermediate GPU buffer",
+            kind: ErrorKind::FailedBufferCopy,
+            ctx: (),
+        })?;
 
         let len = data.len().min(buffer.size_bytes() as usize);
 
         data[..len].copy_from_slice(
-            &buffer_slice.get_mapped_range().map_err(|_| Error {
+            &dst.get_mapped_range(..).map_err(|e| {
+                std::eprintln!("{e:?}");
+                Error {
                 msg: "failed to map GPU memory to CPU",
                 kind: ErrorKind::FailedBufferCopy,
                 ctx: (),
-            })?[..len],
+            }})?[..len],
         );
         dst.unmap();
 
@@ -335,17 +347,15 @@ impl GpuBackend for GpuContext {
 
                 let kernel = match &kernel.val {
                     Redirect::Unmasked(kernel_data) => kernel_data,
-                    Redirect::Redirected(idx) => {
-                        let redirected = match &kernels[*idx].val {
-                            Redirect::Unmasked(kernel) => kernel,
-                            Redirect::Redirected(_) => return Err(Error {
+                    Redirect::Redirected(idx) => match &kernels[*idx].val {
+                        Redirect::Unmasked(kernel) => kernel,
+                        Redirect::Redirected(_) => {
+                            return Err(Error {
                                 msg: "double redirection or loop encountered in kernel resolution",
                                 kind: ErrorKind::UnresolvedRedirection,
                                 ctx: (),
-                            }),
-                        };
-
-                        redirected
+                            });
+                        }
                     },
                 };
 
@@ -679,6 +689,8 @@ fn emit_ops(kernel: &RawKernel, out: &mut String, pretty_print: bool) {
 
 fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &RawKernel) {
     match op {
+        Op::Nop => {}
+
         Op::DefineVar { id } => {
             let val = &kernel.values[*id];
             match val.state {
@@ -711,45 +723,31 @@ fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &RawKernel
         }
 
         Op::OverwriteVar { id, val } => {
-            let _ = write!(out, "v{id} = ");
-            process_op(out, val, nesting, kernel);
-            let _ = write!(out, ";");
+            let _ = write!(out, "v{id} = {};", render_val(*val, kernel));
         }
 
         Op::AddAssign { id, val } => {
-            let _ = write!(out, "v{id} += ");
-            process_op(out, val, nesting, kernel);
-            let _ = write!(out, ";");
+            let _ = write!(out, "v{id} += {};", render_val(*val, kernel));
         }
 
         Op::MulAssign { id, val } => {
-            let _ = write!(out, "v{id} *= ");
-            process_op(out, val, nesting, kernel);
-            let _ = write!(out, ";");
+            let _ = write!(out, "v{id} *= {};", render_val(*val, kernel));
         }
 
         Op::DivAssign { id, val } => {
-            let _ = write!(out, "v{id} /= ");
-            process_op(out, val, nesting, kernel);
-            let _ = write!(out, ";");
+            let _ = write!(out, "v{id} /= {};", render_val(*val, kernel));
         }
 
         Op::SubAssign { id, val } => {
-            let _ = write!(out, "v{id} -= ");
-            process_op(out, val, nesting, kernel);
-            let _ = write!(out, ";");
+            let _ = write!(out, "v{id} -= {};", render_val(*val, kernel));
         }
 
         Op::ShlAssign { id, val } => {
-            let _ = write!(out, "v{id} <<= ");
-            process_op(out, val, nesting, kernel);
-            let _ = write!(out, ";");
+            let _ = write!(out, "v{id} <<= {};", render_val(*val, kernel));
         }
 
         Op::ShrAssign { id, val } => {
-            let _ = write!(out, "v{id} >>= ");
-            process_op(out, val, nesting, kernel);
-            let _ = write!(out, ";");
+            let _ = write!(out, "v{id} >>= {};", render_val(*val, kernel));
         }
 
         Op::CopyVar { id } => {
@@ -976,6 +974,10 @@ fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &RawKernel
             let _ = write!(out, "param{param}[{}]", render_val(*index, kernel));
         }
 
+        Op::Not { cond } => {
+            let _ = write!(out, "!{}", render_val(*cond, kernel));
+        }
+
         Op::ParamStore {
             param,
             index,
@@ -1141,13 +1143,6 @@ fn process_op(out: &mut String, op: &Op, nesting: &mut usize, kernel: &RawKernel
                 render_val(*end, kernel),
                 render_val(*step, kernel),
             );
-            *nesting += 1;
-        }
-
-        Op::WhileLoopBegin { cond } => {
-            let _ = write!(out, "while ");
-            process_op(out, cond, nesting, kernel);
-            let _ = write!(out, " {{");
             *nesting += 1;
         }
 

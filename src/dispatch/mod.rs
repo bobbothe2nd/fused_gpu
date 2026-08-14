@@ -2,8 +2,11 @@
 
 use crate::{
     dispatch::backend::{
-        Graph, MetaId, NodeId, Param, kernel::{Dependencies, RawKernel, Redirect, SaveIndicator},
-    }, errors::Error, tensor::{Tensor, build_dims},
+        Graph, MetaId, NodeId, Param,
+        kernel::{Dependencies, RawKernel, Redirect, SaveIndicator},
+    },
+    errors::Error,
+    tensor::{Tensor, build_dims},
 };
 use alloc::{vec, vec::Vec};
 use briny::{
@@ -81,18 +84,60 @@ impl Default for DebugCompilationOptions {
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct OptCompilationOptions {
+    /// Sets tile size or block size.
     pub tile_size: u32,
-    pub opt_passes: u8,
-    pub opt_level: u8,
+
+    /// Sets the amount of passes to optimize each kernel.
+    ///
+    /// The compiler will quickly run out of optimizations if this is set too high.
+    pub passes: u8,
+
+    /// Defines the set of optimizations the compiler will run each pass.
+    pub flags: OptFlags,
 }
 
 impl Default for OptCompilationOptions {
     fn default() -> Self {
         Self {
             tile_size: 16,
-            opt_passes: 0,
-            opt_level: 0,
+            passes: 1,
+            flags: OptFlags::all(),
         }
+    }
+}
+
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+    pub struct OptFlags: u8 {
+        /// Enables or disables dead code elimination.
+        ///
+        /// `let useless = 1234;` -> [[nothing]]
+        const DEAD_CODE = 1 << 0;
+
+        /// Enables or disables constant folding.
+        ///
+        /// `2*2` -> `4`
+        const CONST_FOLD = 1 << 1;
+
+        /// Converts assignments to op-assignments.
+        ///
+        /// `a = b + a;` -> `a += b;`
+        const OP_ASSIGN = 1 << 2;
+
+        /// Applies the identity prperty to arithmetic.
+        ///
+        /// `x*1` or `x/1` or `x+0` or `x-0` -> `x`
+        const IDENTITY = 1 << 3;
+
+        /// Converts constant division statements to multiplication.
+        ///
+        /// `x/2` -> `x*0.5`
+        const DIV_CONST = 1 << 4;
+
+        /// Fuses multiply-add operations.
+        ///
+        /// `a*b+c` -> `fma(a,b,c)`
+        const MUL_ADD = 1 << 5;
     }
 }
 
@@ -341,27 +386,31 @@ impl<B: GpuBackend> GpuContext<B> {
 
                 let compiled = match &kernel.val {
                     Redirect::Unmasked(kernel) => {
-                        let params = ir.forward.params.iter().enumerate().filter_map(|(i, param)| if kernel.params[i] {
-                            Some(*param)
-                        } else {
-                            None
-                        }).collect::<Vec<_>>();
+                        let params = ir
+                            .forward
+                            .params
+                            .iter()
+                            .enumerate()
+                            .filter_map(
+                                |(i, param)| if kernel.params[i] { Some(*param) } else { None },
+                            )
+                            .collect::<Vec<_>>();
 
                         Redirect::Unmasked((
                             self.inner.compile(&kernel.raw, &params, options)?,
                             kernel.raw.root,
                             kernel.params.as_slice(),
                         ))
-                    },
+                    }
                     Redirect::Redirected(idx) => Redirect::Redirected(*idx),
                 };
 
-                Ok(Dependencies {
-                    val: compiled,
-                    dep,
-                })
+                Ok(Dependencies { val: compiled, dep })
             })
-            .collect::<Result<Vec<Dependencies<Redirect<(<B as GpuBackend>::Kernel, usize, &'a [bool])>>>, Error>>()?;
+            .collect::<Result<
+                Vec<Dependencies<Redirect<(<B as GpuBackend>::Kernel, usize, &'a [bool])>>>,
+                Error,
+            >>()?;
 
         let backward = ir
             .backward
@@ -372,27 +421,31 @@ impl<B: GpuBackend> GpuContext<B> {
 
                 let compiled = match &kernel.val {
                     Redirect::Unmasked(kernel) => {
-                        let params = ir.backward.params.iter().enumerate().filter_map(|(i, param)| if kernel.params[i] {
-                            Some(*param)
-                        } else {
-                            None
-                        }).collect::<Vec<_>>();
+                        let params = ir
+                            .backward
+                            .params
+                            .iter()
+                            .enumerate()
+                            .filter_map(
+                                |(i, param)| if kernel.params[i] { Some(*param) } else { None },
+                            )
+                            .collect::<Vec<_>>();
 
                         Redirect::Unmasked((
                             self.inner.compile(&kernel.raw, &params, options)?,
                             kernel.raw.root,
                             kernel.params.as_slice(),
                         ))
-                    },
+                    }
                     Redirect::Redirected(idx) => Redirect::Redirected(*idx),
                 };
 
-                Ok(Dependencies {
-                    val: compiled,
-                    dep,
-                })
+                Ok(Dependencies { val: compiled, dep })
             })
-            .collect::<Result<Vec<Dependencies<Redirect<(<B as GpuBackend>::Kernel, usize, &'a [bool])>>>, Error>>()?;
+            .collect::<Result<
+                Vec<Dependencies<Redirect<(<B as GpuBackend>::Kernel, usize, &'a [bool])>>>,
+                Error,
+            >>()?;
 
         let loss = self.inner.compile(&ir.loss.raw, &ir.loss.params, options)?;
 

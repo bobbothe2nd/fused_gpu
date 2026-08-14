@@ -8,13 +8,12 @@ use crate::{
     },
     errors::{Error, ErrorKind, GraphErrorContext},
 };
-use alloc::{boxed::Box, vec, vec::Vec};
-
-mod forward;
+use alloc::{vec, vec::Vec};
 
 mod backward;
-
+mod forward;
 mod loss;
+mod optimize;
 
 /// Forward, backward, and loss kernel IR.
 #[derive(Debug)]
@@ -196,10 +195,24 @@ impl<'a> KernelsChained<'a> {
 
         let forward = forward::lower_forward(graph, meta, saved, options)?;
         let backward = backward::lower_backward(graph, meta, saved, options)?;
-        let loss = loss::lower_loss(graph, meta);
+        let mut loss = loss::lower_loss(graph, meta);
 
-        let forward = eliminate_kernels(forward);
-        let backward = eliminate_kernels(backward);
+        let mut forward = eliminate_kernels(forward);
+        let mut backward = eliminate_kernels(backward);
+
+        for kernel in &mut forward.kernels {
+            if let Redirect::Unmasked(kernel) = &mut kernel.val {
+                // optimize::optimize(&mut kernel.raw, options);
+            }
+        }
+
+        for kernel in &mut backward.kernels {
+            if let Redirect::Unmasked(kernel) = &mut kernel.val {
+                // optimize::optimize(&mut kernel.raw, options);
+            }
+        }
+
+        // optimize::optimize(&mut loss.raw, options);
 
         Ok(KernelGroup {
             forward,
@@ -215,14 +228,16 @@ pub enum Redirect<T> {
     Redirected(usize),
 }
 
-fn eliminate_kernels<'a, B: GpuBackend>(kernels: KernelsChained<'a, B>) -> KernelsRedirected<'a, B> {
+fn eliminate_kernels<'a, B: GpuBackend>(
+    kernels: KernelsChained<'a, B>,
+) -> KernelsRedirected<'a, B> {
     let mut kernels_optimized: Vec<Dependencies<Redirect<LinkedKernel<'a, B>>>> = Vec::new();
 
     for kernel in kernels.kernels {
         let mut unique_id = usize::MAX;
 
         for (idx, resolved_kernel) in kernels_optimized.iter().enumerate() {
-            if let Redirect::Unmasked(resolved_kernel) = &resolved_kernel.val 
+            if let Redirect::Unmasked(resolved_kernel) = &resolved_kernel.val
                 && kernel.val.ops == resolved_kernel.ops
                 && kernel.val.meta == resolved_kernel.meta
                 && kernel.val.params == resolved_kernel.params
@@ -324,9 +339,14 @@ impl<B: GpuBackend> LinkedKernel<'_, B> {
         cond: Op,
         content: F,
     ) -> Result<R, Error> {
-        self.raw.ops.push(Op::WhileLoopBegin {
-            cond: Box::new(cond),
-        });
+        self.raw.ops.push(Op::ForeverLoopBegin);
+        let cond = self
+            .raw
+            .def_var(DType::Bool, ValueState::Inline, Some(cond));
+        self.push_if(cond, |kernel| {
+            kernel.raw.push_break();
+            Ok(())
+        })?;
         let ret = content(self);
         self.raw.ops.push(Op::EndScope);
         ret
@@ -437,8 +457,10 @@ pub struct RawKernel {
 
     pub shared: Vec<SharedAlloc>,
 
+    /// Contains all expressions.
     pub values: Vec<Value>,
 
+    /// Contains all statements.
     pub ops: Vec<Op>,
 
     pub block: [u32; 3],
@@ -493,9 +515,13 @@ impl RawKernel {
         cond: Op,
         content: F,
     ) -> Result<R, Error> {
-        self.ops.push(Op::WhileLoopBegin {
-            cond: Box::new(cond),
-        });
+        self.ops.push(Op::ForeverLoopBegin);
+        let cond = self.def_var(DType::Bool, ValueState::Inline, Some(cond));
+        let not_cond = self.def_var(DType::Bool, ValueState::Inline, Some(Op::Not { cond, }));
+        self.push_if(not_cond, |kernel| {
+            kernel.push_break();
+            Ok(())
+        })?;
         let ret = content(self);
         self.ops.push(Op::EndScope);
         ret
@@ -577,52 +603,45 @@ impl RawKernel {
     }
 
     pub fn overwrite_var(&mut self, id: ValueId, op: Op) {
-        self.ops.push(Op::OverwriteVar {
-            id,
-            val: Box::new(op),
-        });
+        let dtype = self.values[id].dtype;
+        let val = self.def_var(dtype, ValueState::Inline, Some(op));
+        self.ops.push(Op::OverwriteVar { id, val });
     }
 
     pub fn accum_var(&mut self, id: ValueId, op: Op) {
-        self.ops.push(Op::AddAssign {
-            id,
-            val: Box::new(op),
-        });
+        let dtype = self.values[id].dtype;
+        let val = self.def_var(dtype, ValueState::Inline, Some(op));
+        self.ops.push(Op::AddAssign { id, val });
     }
 
     pub fn mul_assign_var(&mut self, id: ValueId, op: Op) {
-        self.ops.push(Op::MulAssign {
-            id,
-            val: Box::new(op),
-        });
+        let dtype = self.values[id].dtype;
+        let val = self.def_var(dtype, ValueState::Inline, Some(op));
+        self.ops.push(Op::MulAssign { id, val });
     }
 
     pub fn div_assign_var(&mut self, id: ValueId, op: Op) {
-        self.ops.push(Op::DivAssign {
-            id,
-            val: Box::new(op),
-        });
+        let dtype = self.values[id].dtype;
+        let val = self.def_var(dtype, ValueState::Inline, Some(op));
+        self.ops.push(Op::DivAssign { id, val });
     }
 
     pub fn sub_assign_var(&mut self, id: ValueId, op: Op) {
-        self.ops.push(Op::SubAssign {
-            id,
-            val: Box::new(op),
-        });
+        let dtype = self.values[id].dtype;
+        let val = self.def_var(dtype, ValueState::Inline, Some(op));
+        self.ops.push(Op::SubAssign { id, val });
     }
 
     pub fn shl_assign_var(&mut self, id: ValueId, op: Op) {
-        self.ops.push(Op::ShlAssign {
-            id,
-            val: Box::new(op),
-        });
+        let dtype = self.values[id].dtype;
+        let val = self.def_var(dtype, ValueState::Inline, Some(op));
+        self.ops.push(Op::ShlAssign { id, val });
     }
 
     pub fn shr_assign_var(&mut self, id: ValueId, op: Op) {
-        self.ops.push(Op::ShrAssign {
-            id,
-            val: Box::new(op),
-        });
+        let dtype = self.values[id].dtype;
+        let val = self.def_var(dtype, ValueState::Inline, Some(op));
+        self.ops.push(Op::ShrAssign { id, val });
     }
 
     pub fn update_var_state(&mut self, id: ValueId, state: ValueState) {

@@ -1,15 +1,73 @@
 use fused_gpu::dispatch::{
-    CompilationOptions, GpuContext, Schedule,
+    CompilationOptions, GpuContext, Schedule, SyncSubmission,
     backend::{Graph, LossType, Metadata},
 };
 use gpu_telemetry::monitor::{GpuMonitor, telemetry::Telemetry};
 use std::time::{Duration, Instant};
 
-fn matmul_chain3_forward_backward() {
-    const M: u32 = 16;
-    const N: u32 = 16;
-    const K: u32 = 128;
-    const H: u32 = 64;
+fn encode<'a>(ctx: &'a GpuContext, schedule: &'a Schedule, iters: usize) -> SyncSubmission<'a> {
+    let mut state = ctx.prepare_batch();
+
+    {
+        let mut pass = ctx.start_batch(&mut state);
+
+        for _ in 0..iters {
+            pass.dispatch_forward(schedule);
+
+            pass.dispatch_backward(schedule);
+        }
+    }
+
+    state.encode()
+}
+
+fn model_runtime(ctx: &GpuContext, schedule: &Schedule) {
+    const ITERS: [usize; 6] = [50, 100, 250, 100, 10, 1];
+
+    let mut prev_iters = ITERS[0];
+    let mut previous_encoded = encode(ctx, schedule, prev_iters);
+
+    for iters in ITERS.into_iter().skip(1) {
+        let sync_start = Instant::now();
+        let runtime_start = Instant::now();
+
+        let submission = previous_encoded.submit();
+
+        let runtime_elapsed = runtime_start.elapsed();
+
+        println!("MODEL SUBMISSION LATENCY: {runtime_elapsed:?} elapsed");
+
+        previous_encoded = encode(ctx, schedule, iters);
+
+        submission.sync();
+
+        let sync_elapsed = sync_start.elapsed();
+
+        println!("  SYNCHRONIZATION {prev_iters}: {sync_elapsed:?} elapsed");
+
+        prev_iters = iters;
+    }
+
+    let sync_start = Instant::now();
+    let runtime_start = Instant::now();
+
+    let submission = previous_encoded.submit();
+
+    let runtime_elapsed = runtime_start.elapsed();
+
+    submission.sync();
+
+    let sync_elapsed = sync_start.elapsed();
+
+    println!("MODEL SUBMISSION LATENCY: {runtime_elapsed:?} elapsed");
+    println!("  SYNCHRONIZATION 1: {sync_elapsed:?} elapsed");
+}
+
+fn main() {
+    const M: u32 = 768;
+    const N: u32 = 1024;
+    const K: u32 = 512;
+    const H: u32 = 256;
 
     const A_VAL: f32 = 3.0;
     const B_VAL: f32 = 2.0;
@@ -25,16 +83,18 @@ fn matmul_chain3_forward_backward() {
 
     let mut graph = Graph::new(LossType::MEAN_SQUARED_ERROR);
 
-    let a = graph.input(&[m, k]);
-    let b = graph.input(&[k, n]);
-    let c = graph.input(&[h, m]);
-    let d = graph.input(&[n, h]);
-    let e = graph.input(&[h, h]);
+    {
+        let a = graph.input(&[m, k]);
+        let b = graph.input(&[k, n]);
+        let c = graph.input(&[h, m]);
+        let d = graph.input(&[n, h]);
+        let e = graph.input(&[h, h]);
 
-    let x = graph.matmul(a, b);
-    let y = graph.matmul(c, x);
-    let z = graph.matmul(y, d);
-    graph.add(z, e);
+        let x = graph.matmul(a, b);
+        let y = graph.matmul(c, x);
+        let z = graph.matmul(y, d);
+        graph.add(z, e);
+    }
 
     let saved = graph.compute_saved_nodes();
     let options = CompilationOptions::default();
@@ -75,7 +135,9 @@ fn matmul_chain3_forward_backward() {
 
     println!("TENSOR INIT TIME: {tensor_elapsed:?} elapsed");
 
-    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors).unwrap();
+    let schedule = ctx
+        .schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors)
+        .unwrap();
 
     let monitor: GpuMonitor<Telemetry> = GpuMonitor::start(Duration::from_millis(3)).unwrap();
 
@@ -83,61 +145,25 @@ fn matmul_chain3_forward_backward() {
 
     let telemetry = monitor.stop().unwrap();
 
-    for (i, sample) in telemetry.samples.iter().enumerate() {
-        println!("SAMPLE {i}:");
+    let mut max_budget = 0;
+    let mut accum_usage = 0;
 
+    for sample in &telemetry.samples {
         for heap in &sample.heaps {
-            println!(" {} HEAP:", if heap.dev_local { "LOCAL" } else { "SHARED" });
-
-            if let Some(size) = heap.size {
-                println!("  size: {size},");
-            }
-
-            if let Some(budget) = heap.budget {
-                println!("  budget: {budget},");
-            }
-
             if let Some(usage) = heap.usage {
-                println!("  usage: {usage},");
+                accum_usage += usage;
             }
 
-            if let Some(reservation) = heap.reservation {
-                println!("  reservation: {reservation},");
-            }
-
-            if let Some(available) = heap.available_for_reservation {
-                println!("  available for reservation: {available},");
+            if let Some(budget) = heap.budget
+                && budget > max_budget
+            {
+                max_budget = budget;
             }
         }
     }
-}
 
-fn model_runtime(ctx: &GpuContext, schedule: &Schedule) {
-    for iters in [100, 10, 1] {
-        let mut state = ctx.prepare_batch();
+    let avg_usage = accum_usage / (telemetry.samples.len() as u64);
 
-        {
-            let mut pass = ctx.start_batch(&mut state);
-
-            for _ in 0..iters {
-                pass.dispatch_forward(schedule);
-
-                pass.dispatch_backward(schedule);
-            }
-        }
-
-        let encoded = state.encode();
-
-        let runtime_start = Instant::now();
-
-        let _ = encoded.submit().sync();
-
-        let runtime_elapsed = runtime_start.elapsed();
-
-        println!("MODEL RUNTIME + SYNCHRONIZATION {iters} TIME: {runtime_elapsed:?} elapsed");
-    }
-}
-
-fn main() {
-    matmul_chain3_forward_backward();
+    println!("\n  AVERAGE MEMORY USAGE: {}", avg_usage);
+    println!(" MAXIMUM MEMORY BUDGET: {}", max_budget);
 }

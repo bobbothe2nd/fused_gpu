@@ -42,7 +42,9 @@ fn mul_add_forward_backward() {
 
     let upload = ctx.upload(&saved_tensors.seed, &[1_f32; 1024]).unwrap();
 
-    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors).unwrap();
+    let schedule = ctx
+        .schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors)
+        .unwrap();
 
     let mut state = ctx.prepare_batch();
 
@@ -114,7 +116,9 @@ fn matmul_sub_softmax_forward_backward() {
 
     let upload = ctx.upload(&saved_tensors.seed, &[1.0_f32; 1024]).unwrap();
 
-    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors).unwrap();
+    let schedule = ctx
+        .schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors)
+        .unwrap();
 
     let mut state = ctx.prepare_batch();
 
@@ -136,21 +140,17 @@ fn matmul_sub_softmax_forward_backward() {
 
     ctx.download(&out_tensor, &mut dst).unwrap();
     let download = &dst[..1024];
-    std::eprintln!(" {:?}", &download[..64]);
     assert!(download.iter().all(|x| *x == 1.0 / 64.0));
 
     ctx.download(&grad_tensors[0], &mut dst).unwrap();
     let download = &dst[..512];
-    std::eprintln!(" {:?}", &download[..64]);
     assert!(download.iter().all(|x| *x == 0.0));
 
     ctx.download(&grad_tensors[1], &mut dst).unwrap();
-    std::eprintln!(" {:?}", &dst[..64]);
     assert!(dst.iter().all(|x| *x == 0.0));
 
     ctx.download(&grad_tensors[2], &mut dst).unwrap();
     let download = &dst[..1024];
-    std::eprintln!(" {:?}", &download[..64]);
     assert!(download.iter().all(|x| *x == 0.0));
 }
 
@@ -186,7 +186,9 @@ fn div_const_softmax_forward_backward() {
 
     let upload = ctx.upload(&saved_tensors.seed, &[1_f32; 512]).unwrap();
 
-    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors).unwrap();
+    let schedule = ctx
+        .schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors)
+        .unwrap();
 
     let mut state = ctx.prepare_batch();
 
@@ -207,11 +209,9 @@ fn div_const_softmax_forward_backward() {
     let grad_tensors = &saved_tensors.grad_tensors;
 
     ctx.download(&out_tensor, &mut dst).unwrap();
-    std::eprintln!(" {:?}", &dst[..64]);
     assert!(dst.iter().all(|x| *x == 1.0 / 32.0));
 
     ctx.download(&grad_tensors[0], &mut dst).unwrap();
-    std::eprintln!(" {:?}", &dst[..64]);
     assert!(dst.iter().all(|x| *x == 0.0));
 }
 
@@ -263,7 +263,9 @@ fn matmul_add_forward_backward() {
         .upload(&saved_tensors.seed, &[1_f32; (M * N) as usize])
         .unwrap();
 
-    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors).unwrap();
+    let schedule = ctx
+        .schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors)
+        .unwrap();
 
     let mut state = ctx.prepare_batch();
 
@@ -284,7 +286,6 @@ fn matmul_add_forward_backward() {
     let grad_tensors = &saved_tensors.grad_tensors;
 
     ctx.download(&out_tensor, &mut dst).unwrap();
-    std::eprintln!(" {:?}", &dst[..64]);
     let download = &dst[..(M * N) as usize];
     assert!(
         download
@@ -293,17 +294,14 @@ fn matmul_add_forward_backward() {
     );
 
     ctx.download(&grad_tensors[0], &mut dst).unwrap();
-    std::eprintln!(" {:?}", &dst[..64]);
     let download = &dst[..(M * K) as usize];
     assert!(download.iter().all(|x| *x == B_VAL * N as f32));
 
     ctx.download(&grad_tensors[1], &mut dst).unwrap();
-    std::eprintln!(" {:?}", &dst[..64]);
     let download = &dst[..(K * N) as usize];
     assert!(download.iter().all(|x| *x == A_VAL * M as f32));
 
     ctx.download(&grad_tensors[2], &mut dst).unwrap();
-    std::eprintln!(" {:?}", &dst[..64]);
     let download = &dst[..(M * N) as usize];
     assert!(download.iter().all(|x| *x == 1.0));
 }
@@ -376,7 +374,9 @@ fn matmul_chain3_forward_backward() {
         .upload(&saved_tensors.seed, &[1_f32; (H * H) as usize])
         .unwrap();
 
-    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors).unwrap();
+    let schedule = ctx
+        .schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors)
+        .unwrap();
 
     let mut state = ctx.prepare_batch();
 
@@ -500,7 +500,9 @@ fn matmul_sub_forward_backward() {
         .upload(&saved_tensors.seed, &[1_f32; (M * N) as usize])
         .unwrap();
 
-    let schedule = ctx.schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors).unwrap();
+    let schedule = ctx
+        .schedule(&kernels, &meta_binding, &in_tensors, &saved_tensors)
+        .unwrap();
 
     let mut state = ctx.prepare_batch();
 

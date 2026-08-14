@@ -1,12 +1,16 @@
-use alloc::{boxed::Box, string::String, vec, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 use core::{cmp::Ordering, fmt::Debug};
 
 use crate::{
     dispatch::{
         CompilationOptions, GpuBackend, GpuBufferBackend, GpuKernelBackend,
         TargetCompilationOptions,
-        backend::kernel::{
-            Kernel, KernelGroup, KernelsChained, LinkedKernel, NodeInput, RawKernel, SaveIndicator,
+        backend::{
+            kernel::{
+                Kernel, KernelGroup, KernelsChained, LinkedKernel, NodeInput, RawKernel,
+                SaveIndicator,
+            },
+            ops::Op,
         },
     },
     errors::{Error, ErrorKind, GraphErrorContext},
@@ -14,6 +18,8 @@ use crate::{
 
 #[cfg(feature = "std")]
 mod std_lib;
+
+pub mod ops;
 
 pub mod kernel;
 
@@ -221,7 +227,7 @@ pub struct SharedAlloc {
 }
 
 /// Value type used in kernel IR.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Value {
     pub state: ValueState,
     pub dtype: DType,
@@ -267,284 +273,6 @@ impl TryFrom<u8> for Axis {
             }),
         }
     }
-}
-
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq)]
-pub enum Op {
-    DefineVar {
-        id: ValueId,
-    },
-    OverwriteVar {
-        id: ValueId,
-        val: Box<Self>,
-    },
-    AddAssign {
-        id: ValueId,
-        val: Box<Self>,
-    },
-    MulAssign {
-        id: ValueId,
-        val: Box<Self>,
-    },
-    DivAssign {
-        id: ValueId,
-        val: Box<Self>,
-    },
-    SubAssign {
-        id: ValueId,
-        val: Box<Self>,
-    },
-    ShlAssign {
-        id: ValueId,
-        val: Box<Self>,
-    },
-    ShrAssign {
-        id: ValueId,
-        val: Box<Self>,
-    },
-    CopyVar {
-        id: ValueId,
-    },
-
-    ConstF32 {
-        value: f32,
-    },
-    ConstU32 {
-        value: u32,
-    },
-    ConstI32 {
-        value: i32,
-    },
-
-    ReadMeta {
-        param: ParamId,
-        field: MetaId,
-    },
-
-    LocalId {
-        axis: Axis,
-    },
-    BlockId {
-        axis: Axis,
-    },
-    GlobalId {
-        axis: Axis,
-    },
-
-    Add {
-        a: ValueId,
-        b: ValueId,
-    },
-    Sub {
-        a: ValueId,
-        b: ValueId,
-    },
-    Mul {
-        a: ValueId,
-        b: ValueId,
-    },
-    Div {
-        a: ValueId,
-        b: ValueId,
-    },
-    Mod {
-        a: ValueId,
-        b: ValueId,
-    },
-    Pow {
-        a: ValueId,
-        b: ValueId,
-    },
-
-    Shl {
-        a: ValueId,
-        b: ValueId,
-    },
-
-    Shr {
-        a: ValueId,
-        b: ValueId,
-    },
-
-    /// (Fused) Operation `a * b + c`
-    Fma {
-        a: ValueId,
-        b: ValueId,
-        c: ValueId,
-    },
-
-    Exp {
-        x: ValueId,
-    },
-    Abs {
-        x: ValueId,
-    },
-    Neg {
-        x: ValueId,
-    },
-    Log {
-        x: ValueId,
-    },
-    Tanh {
-        x: ValueId,
-    },
-    Sqrt {
-        x: ValueId,
-    },
-
-    ParamLoad {
-        param: ParamId,
-        index: ValueId,
-    },
-    ParamStore {
-        param: ParamId,
-        index: ValueId,
-        value: ValueId,
-    },
-    ParamAccum {
-        param: ParamId,
-        index: ValueId,
-        value: ValueId,
-    },
-    ParamMul {
-        param: ParamId,
-        index: ValueId,
-        value: ValueId,
-    },
-    ParamDiv {
-        param: ParamId,
-        index: ValueId,
-        value: ValueId,
-    },
-    ParamSub {
-        param: ParamId,
-        index: ValueId,
-        value: ValueId,
-    },
-    ParamShl {
-        param: ParamId,
-        index: ValueId,
-        value: ValueId,
-    },
-    ParamShr {
-        param: ParamId,
-        index: ValueId,
-        value: ValueId,
-    },
-
-    SharedLoad {
-        mem: SharedId,
-        index: ValueId,
-    },
-    SharedStore {
-        mem: SharedId,
-        index: ValueId,
-        value: ValueId,
-    },
-    SharedAccum {
-        mem: SharedId,
-        index: ValueId,
-        value: ValueId,
-    },
-    SharedMul {
-        mem: SharedId,
-        index: ValueId,
-        value: ValueId,
-    },
-    SharedDiv {
-        mem: SharedId,
-        index: ValueId,
-        value: ValueId,
-    },
-    SharedSub {
-        mem: SharedId,
-        index: ValueId,
-        value: ValueId,
-    },
-    SharedShl {
-        mem: SharedId,
-        index: ValueId,
-        value: ValueId,
-    },
-    SharedShr {
-        mem: SharedId,
-        index: ValueId,
-        value: ValueId,
-    },
-
-    Eq {
-        a: ValueId,
-        b: ValueId,
-    },
-
-    Ne {
-        a: ValueId,
-        b: ValueId,
-    },
-
-    Lt {
-        a: ValueId,
-        b: ValueId,
-    },
-
-    Gt {
-        a: ValueId,
-        b: ValueId,
-    },
-
-    Le {
-        a: ValueId,
-        b: ValueId,
-    },
-
-    Ge {
-        a: ValueId,
-        b: ValueId,
-    },
-
-    Max {
-        a: ValueId,
-        b: ValueId,
-    },
-    Min {
-        a: ValueId,
-        b: ValueId,
-    },
-
-    Select {
-        cond: ValueId,
-        a: ValueId,
-        b: ValueId,
-    },
-
-    ForLoopBegin {
-        index: ValueId,
-        end: ValueId,
-        step: ValueId,
-    },
-
-    WhileLoopBegin {
-        cond: Box<Self>,
-    },
-
-    ForeverLoopBegin,
-
-    Continue,
-
-    Break,
-
-    IfBegin {
-        cond: ValueId,
-    },
-
-    ElseBegin,
-
-    EndScope,
-
-    Barrier,
-
-    Return,
 }
 
 #[derive(Debug)]
@@ -744,13 +472,9 @@ impl<B: GpuBackend> PartialEq for GraphOp<'_, B> {
         match (self, other) {
             (Self::Input, Self::Input) => true,
             (Self::ConstF32(a), Self::ConstF32(b)) => a == b,
-            (Self::Custom {
-                lower: a_lower,
-                ..
-            }, Self::Custom {
-                lower: b_lower,
-                ..
-            }) => (*a_lower as usize) == (*b_lower as usize),
+            (Self::Custom { lower: a_lower, .. }, Self::Custom { lower: b_lower, .. }) => {
+                (*a_lower as usize) == (*b_lower as usize)
+            }
             _ => false,
         }
     }
