@@ -293,8 +293,7 @@ fn eval_grad<'a, B: GpuBackend>(
         && least_valid_dispatch != DispatchOptions::Any;
 
     if (node.op.is_transform() && !stable_iteration_space)
-        || dims_invalid
-        || !(node.op.is_compute_gid() || resolved.is_empty())
+        || (!node.op.is_compute_gid() && (dims_invalid || resolved.is_empty()))
     {
         let param = node_params[node_id].ok_or(Error {
             msg: "grad root param not materialized",

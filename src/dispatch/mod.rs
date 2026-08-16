@@ -77,7 +77,7 @@ pub struct DebugCompilationOptions {
 impl Default for DebugCompilationOptions {
     fn default() -> Self {
         Self {
-            pretty_print_ir: false,
+            pretty_print_ir: true,
         }
     }
 }
@@ -108,10 +108,10 @@ impl Default for OptCompilationOptions {
 
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-    pub struct OptFlags: u8 {
+    pub struct OptFlags: u16 {
         /// Enables or disables dead code elimination.
         ///
-        /// `let useless = 1234;` -> [[nothing]]
+        /// `let useless = 1234;` -> nothing
         const DEAD_CODE = 1 << 0;
 
         /// Enables or disables constant folding.
@@ -138,6 +138,36 @@ bitflags::bitflags! {
         ///
         /// `a*b+c` -> `fma(a,b,c)`
         const MUL_ADD = 1 << 5;
+
+        /// Moves operations that dont depend on the state of a loop to before the loop started.
+        ///
+        /// `loop { a = b; }` -> `a = b; loop {  }`
+        const LOOP_STATELESS = 1 << 6;
+
+        /// Removes empty scopes (loop, if) to simplify code.
+        ///
+        /// `loop {  }` -> nothing
+        const EMPTY_SCOPE = 1 << 7;
+
+        /// Changes mutable variables to immutable variables if they are never mutated.
+        ///
+        /// `let mut a = 123;` -> `let a = 123;`
+        const UNUSED_MUT = 1 << 8;
+
+        /// Removes copies of immutable variables, replacing their usages directly with the copied variable.
+        ///
+        /// `let a = 123; let b = a; let c = b - 1;` -> `let a = 123; let c = a - 1;`
+        const COPY_IMMUT = 1 << 9;
+
+        /// Replaces inline variables with immutable variables if they are used more than once.
+        ///
+        /// `let a = 1 + 1 + 1; let b = 1 + 1 + 2;` -> `let two = 1 + 1; let a = two + 1; let b = two + 2;`
+        const REUSE_INLINE = 1 << 10;
+
+        /// Removes duplicate immutable variables, moving them to the smallest scope that encompasses both.
+        ///
+        /// `let a = 1 + 1 + 1; let b = 1 + 1 + 2;` -> `let two = 1 + 1; let a = two + 1; let b = two + 2;`
+        const DUPLICATE_IMMUT = 1 << 11;
     }
 }
 

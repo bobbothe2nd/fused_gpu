@@ -384,4 +384,24 @@ impl Op {
             _ => None,
         }
     }
+
+    #[must_use]
+    pub const fn is_zero(&self) -> bool {
+        match self {
+            Self::ConstF32 { value } => *value == 0.0,
+            Self::ConstI32 { value } => *value == 0,
+            Self::ConstU32 { value } => *value == 0,
+            _ => false,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_one(&self) -> bool {
+        match self {
+            Self::ConstF32 { value } => *value == 1.0,
+            Self::ConstI32 { value } => *value == 1,
+            Self::ConstU32 { value } => *value == 1,
+            _ => false,
+        }
+    }
 }

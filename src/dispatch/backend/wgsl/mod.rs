@@ -538,6 +538,8 @@ fn generate_wgsl(kernel: &RawKernel, params: &[Param], pretty_print: bool) -> St
 
     emit_entry(kernel, &mut out, pretty_print);
 
+    std::eprintln!("{out}");
+
     out
 }
 

@@ -79,7 +79,7 @@ pub fn lower_forward<'a, B: GpuBackend>(
     }
 
     let output_param = params.len();
-    node_params[graph.nodes.len() - 1] = Some(output_param);
+    saved_params[graph.nodes.len() - 1] = Some(output_param);
 
     params.push(Param {
         dtype: DType::Float,
@@ -90,14 +90,15 @@ pub fn lower_forward<'a, B: GpuBackend>(
     let mut resolved = Vec::new();
 
     while roots.iter().any(|x| !graph.nodes[*x].inputs.is_empty()) {
-        let depth = kernels.len();
-
         let roots_clone = roots.clone();
 
         roots.clear();
 
         for root in roots_clone {
+            std::eprintln!("evaluating root {root:?}");
+
             if resolved.contains(&root) {
+                std::eprintln!("  [already resolved]");
                 continue;
             }
 
@@ -248,10 +249,6 @@ pub fn lower_forward<'a, B: GpuBackend>(
                 roots.push(*inner_root);
             }
 
-            if depth == 0 && graph.nodes[kernel.raw.root].op.is_compute_gid() {
-                kernel.param_store(output_param, gid, out);
-            }
-
             for kernel in &mut kernels {
                 if kernel.val.raw.root > root {
                     kernel.dep.push(root);
@@ -262,6 +259,8 @@ pub fn lower_forward<'a, B: GpuBackend>(
                 val: kernel,
                 dep: Vec::new(),
             });
+
+            std::eprintln!("  done resolved={resolved:?}, produced roots={roots:?}");
         }
     }
 
@@ -293,7 +292,7 @@ fn eval_node<'a, B: GpuBackend>(
     node_params: &[Option<ParamId>],
     saved_params: &[Option<ParamId>],
     kernel: &mut LinkedKernel<'a, B>,
-    idx: ValueId,
+    index: ValueId,
     base: ValueId,
     local_row: ValueId,
     local_col: ValueId,
@@ -312,6 +311,8 @@ fn eval_node<'a, B: GpuBackend>(
             });
         }
     };
+
+    std::eprintln!("  resolving {node_id:?}");
 
     kernel.ops.push(&graph.nodes[node_id].op);
 
@@ -333,7 +334,7 @@ fn eval_node<'a, B: GpuBackend>(
 
             kernel
                 .raw
-                .overwrite_var(out, Op::ParamLoad { param, index: idx });
+                .overwrite_var(out, Op::ParamLoad { param, index: index });
             kernel.register_param(param);
         }
 
@@ -372,6 +373,9 @@ fn eval_node<'a, B: GpuBackend>(
                 || dims_invalid
                 || !(computes_gid || resolved.is_empty())
             {
+                std::eprintln!("  splitting kernel at iter={:?}, dims={:?}, resolve={:?}",
+                !(stable_iter || stable_iteration_space), dims_invalid, !(computes_gid || resolved.is_empty()));
+
                 let param = saved_params[node_id].ok_or(Error {
                     msg: "saved root param not materialized",
                     kind: ErrorKind::ParamNotMaterialized,
@@ -379,7 +383,7 @@ fn eval_node<'a, B: GpuBackend>(
                 })?;
                 kernel
                     .raw
-                    .overwrite_var(out, Op::ParamLoad { param, index: idx });
+                    .overwrite_var(out, Op::ParamLoad { param, index });
 
                 kernel.register_param(param);
 
@@ -399,7 +403,7 @@ fn eval_node<'a, B: GpuBackend>(
                 saved_params,
                 kernel,
                 base,
-                idx,
+                index,
                 local_row,
                 local_col,
                 shared_size,
@@ -415,7 +419,7 @@ fn eval_node<'a, B: GpuBackend>(
     if let Some(saved) = saved_params[node_id]
         && node.op.is_auto_save()
     {
-        kernel.param_store(saved, idx, out);
+        kernel.param_store(saved, index, out);
     }
 
     if !resolved.contains(&node_id) {
