@@ -28,7 +28,7 @@ pub fn lower_matmul_recursive<'a, B: GpuBackend>(
         ValueId,
         u32,
         ValueId,
-        bool,
+        &mut bool,
         &CompilationOptions<B>,
     ) -> Result<Vec<NodeId>, Error>,
     root: NodeId,
@@ -47,9 +47,11 @@ pub fn lower_matmul_recursive<'a, B: GpuBackend>(
     local_col: ValueId,
     shared_size: u32,
     tile_size: ValueId,
-    _stable_iteration_space: bool,
+    stable_iteration_space: &mut bool,
     options: &CompilationOptions<B>,
 ) -> Result<Vec<NodeId>, Error> {
+    *stable_iteration_space = false;
+
     let row = kernel.raw.def_var(
         DType::UnsignedInt,
         ValueState::Immut,
@@ -165,6 +167,7 @@ pub fn lower_matmul_recursive<'a, B: GpuBackend>(
         local_col,
         shared_size,
         tile_size,
+        stable_iteration_space,
         options,
     )
 }
@@ -186,7 +189,7 @@ pub fn forward_matmul<'a, B: GpuBackend>(
         ValueId,
         u32,
         ValueId,
-        bool,
+        &mut bool,
         &CompilationOptions<B>,
     ) -> Result<Vec<NodeId>, Error>,
     root: NodeId,
@@ -211,6 +214,7 @@ pub fn forward_matmul<'a, B: GpuBackend>(
     local_col: ValueId,
     shared_size: u32,
     tile_size: ValueId,
+    stable_iteration_space: &mut bool,
     options: &CompilationOptions<B>,
 ) -> Result<Vec<NodeId>, Error> {
     let mut deepest = Vec::new();
@@ -325,7 +329,7 @@ pub fn forward_matmul<'a, B: GpuBackend>(
             local_col,
             shared_size,
             tile_size,
-            false,
+            stable_iteration_space,
             options,
         )?;
 
@@ -387,7 +391,7 @@ pub fn forward_matmul<'a, B: GpuBackend>(
             local_col,
             shared_size,
             tile_size,
-            false,
+            stable_iteration_space,
             options,
         )?;
 

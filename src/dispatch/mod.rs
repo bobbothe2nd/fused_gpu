@@ -100,7 +100,7 @@ impl Default for OptCompilationOptions {
     fn default() -> Self {
         Self {
             tile_size: 16,
-            passes: 1,
+            passes: 2,
             flags: OptFlags::all(),
         }
     }

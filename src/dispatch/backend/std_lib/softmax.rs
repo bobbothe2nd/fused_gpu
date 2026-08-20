@@ -28,7 +28,7 @@ pub fn lower_softmax_recursive<'a, B: GpuBackend>(
         ValueId,
         u32,
         ValueId,
-        bool,
+        &mut bool,
         &CompilationOptions<B>,
     ) -> Result<Vec<NodeId>, Error>,
     root: NodeId,
@@ -47,7 +47,7 @@ pub fn lower_softmax_recursive<'a, B: GpuBackend>(
     tid: ValueId,
     shared_size: u32,
     tile_size: ValueId,
-    _stable_iteration_space: bool,
+    stable_iteration_space: &mut bool,
     options: &CompilationOptions<B>,
 ) -> Result<Vec<NodeId>, Error> {
     let node = &graph.nodes[node_id];
@@ -149,7 +149,7 @@ pub fn lower_softmax_recursive<'a, B: GpuBackend>(
                     tid,
                     shared_size,
                     tile_size,
-                    false,
+                    stable_iteration_space,
                     options,
                 );
 
@@ -303,7 +303,7 @@ pub fn lower_softmax_recursive<'a, B: GpuBackend>(
                     tid,
                     shared_size,
                     tile_size,
-                    false,
+                    stable_iteration_space,
                     options,
                 )?;
 
@@ -491,7 +491,7 @@ pub fn lower_softmax_recursive<'a, B: GpuBackend>(
                     tid,
                     shared_size,
                     tile_size,
-                    false,
+                    stable_iteration_space,
                     options,
                 );
 
@@ -632,7 +632,7 @@ pub fn lower_softmax_recursive<'a, B: GpuBackend>(
                     tid,
                     shared_size,
                     tile_size,
-                    false,
+                    stable_iteration_space,
                     options,
                 )?;
 

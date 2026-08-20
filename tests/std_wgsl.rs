@@ -154,9 +154,11 @@ fn matmul_sub_softmax_forward_backward() {
     ctx.download(&grad_tensors[2], &mut dst).unwrap();
     let download = &dst[..1024];
     assert!(download.iter().all(|x| *x == 0.0));
+
+    panic!();
 }
 
-// #[test]
+#[test]
 fn div_const_softmax_forward_backward() {
     let mut meta = Metadata::new();
     let m = meta.new_field();
@@ -220,7 +222,7 @@ fn div_const_softmax_forward_backward() {
     assert!(dst.iter().all(|x| *x == 0.0));
 }
 
-// #[test]
+#[test]
 fn matmul_add_forward_backward() {
     const M: u32 = 32;
     const N: u32 = 64;
@@ -312,7 +314,7 @@ fn matmul_add_forward_backward() {
     assert!(download.iter().all(|x| *x == 1.0));
 }
 
-// #[test]
+#[test]
 fn matmul_chain3_forward_backward() {
     const M: u32 = 32;
     const N: u32 = 64;

@@ -70,7 +70,7 @@ macro_rules! lower_unary {
             ValueId,
             u32,
             ValueId,
-            bool,
+            &mut bool,
             &CompilationOptions<B>,
         ) -> Result<Vec<NodeId>, Error>,
         root: NodeId,
@@ -89,7 +89,7 @@ macro_rules! lower_unary {
         local_col: ValueId,
         shared_size: u32,
         tile_size: ValueId,
-        stable_iteration_space: bool,
+        stable_iteration_space: &mut bool,
         options: &CompilationOptions<B>| {
             let mut deepest;
 

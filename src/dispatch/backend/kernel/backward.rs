@@ -137,6 +137,8 @@ pub fn lower_backward<'a, B: GpuBackend>(
                     Some(Op::LocalId { axis: Axis::X }),
                 );
 
+                let mut stable_iteration_space = true;
+
                 let new_roots = eval_grad::<B>(
                     root,
                     input,
@@ -153,7 +155,7 @@ pub fn lower_backward<'a, B: GpuBackend>(
                     local_col,
                     shared_size,
                     tile_size,
-                    true,
+                    &mut stable_iteration_space,
                     options,
                 )?;
 
@@ -232,7 +234,7 @@ fn eval_grad<'a, B: GpuBackend>(
     local_col: ValueId,
     shared_size: u32,
     tile_size: ValueId,
-    stable_iteration_space: bool,
+    stable_iteration_space: &mut bool,
     options: &CompilationOptions<B>,
 ) -> Result<Vec<NodeId>, Error> {
     let node_id = match node_id {
@@ -292,8 +294,8 @@ fn eval_grad<'a, B: GpuBackend>(
         != Some(Ordering::Less))
         && least_valid_dispatch != DispatchOptions::Any;
 
-    if (node.op.is_transform() && !stable_iteration_space)
-        || (!node.op.is_compute_gid() && (dims_invalid || resolved.is_empty()))
+    if (node.op.is_transform() && !*stable_iteration_space)
+        || (!node.op.is_compute_gid() && dims_invalid)
     {
         let param = node_params[node_id].ok_or(Error {
             msg: "grad root param not materialized",

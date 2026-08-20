@@ -205,6 +205,8 @@ pub fn lower_forward<'a, B: GpuBackend>(
 
             let out = kernel.raw.def_var(DType::Float, ValueState::Mut, None);
 
+            let mut stable_iteration_space = true;
+
             let new_roots = eval_node(
                 root,
                 0,
@@ -221,7 +223,7 @@ pub fn lower_forward<'a, B: GpuBackend>(
                 local_col,
                 shared_size,
                 tile_size,
-                true,
+                &mut stable_iteration_space,
                 options,
             )?;
 
@@ -298,7 +300,7 @@ fn eval_node<'a, B: GpuBackend>(
     local_col: ValueId,
     shared_size: u32,
     tile_size: ValueId,
-    stable_iteration_space: bool,
+    stable_iteration_space: &mut bool, // need to keep the same iter space throughout compilation
     options: &CompilationOptions<B>,
 ) -> Result<Vec<NodeId>, Error> {
     let node_id = match node_id {
@@ -334,7 +336,7 @@ fn eval_node<'a, B: GpuBackend>(
 
             kernel
                 .raw
-                .overwrite_var(out, Op::ParamLoad { param, index: index });
+                .overwrite_var(out, Op::ParamLoad { param, index });
             kernel.register_param(param);
         }
 
@@ -369,12 +371,13 @@ fn eval_node<'a, B: GpuBackend>(
                 != Some(Ordering::Less))
                 && least_valid_dispatch != DispatchOptions::Any;
 
-            if !(stable_iter || stable_iteration_space)
-                || dims_invalid
-                || !(computes_gid || resolved.is_empty())
-            {
-                std::eprintln!("  splitting kernel at iter={:?}, dims={:?}, resolve={:?}",
-                !(stable_iter || stable_iteration_space), dims_invalid, !(computes_gid || resolved.is_empty()));
+            if !(stable_iter || *stable_iteration_space) || dims_invalid || !computes_gid {
+                std::eprintln!(
+                    "  splitting kernel at iter={:?}, dims={:?}, resolve={:?}",
+                    !(stable_iter || *stable_iteration_space),
+                    dims_invalid,
+                    !(computes_gid || resolved.is_empty())
+                );
 
                 let param = saved_params[node_id].ok_or(Error {
                     msg: "saved root param not materialized",

@@ -1,6 +1,6 @@
 [package]
 name = "fused_gpu"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 readme = "README.md"
 description = "GPU graph compilation to fuse linear tensor operations"

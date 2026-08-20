@@ -121,7 +121,9 @@ fn dead_code_elimination<B: GpuBackend>(kernel: &mut RawKernel, options: &Compil
                 continue;
             }
 
-            if !any_ops(kernel, |op| op.does_read(value_id)) {
+            if !any_ops(kernel, |op| {
+                op.does_read(value_id) && !op.does_write(value_id)
+            }) {
                 kernel.values[value_id].state = ValueState::Masked;
                 erase_writes(kernel, value_id);
             }
@@ -129,10 +131,7 @@ fn dead_code_elimination<B: GpuBackend>(kernel: &mut RawKernel, options: &Compil
     }
 }
 
-fn iter_values<R>(
-    kernel: &RawKernel,
-    mut f: impl FnMut(&Op, ValueId) -> Option<R>,
-) -> Vec<R> {
+fn iter_values<R>(kernel: &RawKernel, mut f: impl FnMut(&Op, ValueId) -> Option<R>) -> Vec<R> {
     let mut value_ids = Vec::new();
 
     for value_id in 0..kernel.values.len() {
@@ -218,18 +217,23 @@ macro_rules! const_fold_op {
     }};
 }
 
-fn const_fold(
-    kernel: &mut RawKernel,
-    value_id: ValueId,
-) {
-    use core::ops::{Add, Mul, Sub, Div, Shr, Shl};
+fn const_fold(kernel: &mut RawKernel, value_id: ValueId) {
+    use core::ops::{Add, Div, Mul, Shl, Shr, Sub};
 
     if let Some(init) = &kernel.values[value_id].init {
         match init {
-            Op::Add { a, b } => const_fold_op!(kernel, value_id, a, b, u32::add, i32::add, f32::add),
-            Op::Mul { a, b } => const_fold_op!(kernel, value_id, a, b, u32::mul, i32::mul, f32::mul),
-            Op::Sub { a, b } => const_fold_op!(kernel, value_id, a, b, u32::sub, i32::sub, f32::sub),
-            Op::Div { a, b } => const_fold_op!(kernel, value_id, a, b, u32::div, i32::div, f32::div),
+            Op::Add { a, b } => {
+                const_fold_op!(kernel, value_id, a, b, u32::add, i32::add, f32::add);
+            }
+            Op::Mul { a, b } => {
+                const_fold_op!(kernel, value_id, a, b, u32::mul, i32::mul, f32::mul);
+            }
+            Op::Sub { a, b } => {
+                const_fold_op!(kernel, value_id, a, b, u32::sub, i32::sub, f32::sub);
+            }
+            Op::Div { a, b } => {
+                const_fold_op!(kernel, value_id, a, b, u32::div, i32::div, f32::div);
+            }
             Op::Shr { a, b } => const_fold_op!(kernel, value_id, a, b, u32::shr, i32::shr,),
             Op::Shl { a, b } => const_fold_op!(kernel, value_id, a, b, u32::shl, i32::shl,),
             Op::Fma { a, b, c } => {
@@ -238,15 +242,19 @@ fn const_fold(
                 let c = kernel.values[*c];
 
                 if a.state == ValueState::Mut
-                || b.state == ValueState::Mut
-                || c.state == ValueState::Mut {
+                    || b.state == ValueState::Mut
+                    || c.state == ValueState::Mut
+                {
                     return;
                 }
 
                 if let Some(Op::ConstF32 { value: a }) = a.init
-                && let Some(Op::ConstF32 { value: b }) = b.init
-                && let Some(Op::ConstF32 { value: c }) = c.init {
-                    kernel.values[value_id].init.replace(Op::ConstF32 { value: (a * b) + c });
+                    && let Some(Op::ConstF32 { value: b }) = b.init
+                    && let Some(Op::ConstF32 { value: c }) = c.init
+                {
+                    kernel.values[value_id]
+                        .init
+                        .replace(Op::ConstF32 { value: (a * b) + c });
                 }
             }
             _ => {}
@@ -254,42 +262,44 @@ fn const_fold(
     }
 }
 
-fn identity(
-    kernel: &mut RawKernel,
-    value_id: ValueId,
-) {
+fn identity(kernel: &mut RawKernel, value_id: ValueId) {
     if let Some(init) = kernel.values[value_id].init {
         match init {
             Op::Add { a, b } => {
                 if kernel.values[a].init.is_some_and(|op| op.is_zero())
-                && kernel.values[a].state != ValueState::Mut {
+                    && kernel.values[a].state != ValueState::Mut
+                {
                     kernel.values[value_id].init.replace(Op::CopyVar { id: b });
                 } else if kernel.values[b].init.is_some_and(|op| op.is_zero())
-                && kernel.values[b].state != ValueState::Mut {
+                    && kernel.values[b].state != ValueState::Mut
+                {
                     kernel.values[value_id].init.replace(Op::CopyVar { id: a });
                 }
             }
             Op::Sub { a, b } => {
                 if kernel.values[b].init.is_some_and(|op| op.is_zero())
-                && kernel.values[b].state != ValueState::Mut {
+                    && kernel.values[b].state != ValueState::Mut
+                {
                     kernel.values[value_id].init.replace(Op::CopyVar { id: a });
                 }
             }
             Op::Mul { a, b } => {
                 if kernel.values[a].init.is_some_and(|op| op.is_one())
-                && kernel.values[a].state != ValueState::Mut {
+                    && kernel.values[a].state != ValueState::Mut
+                {
                     kernel.values[value_id].init.replace(Op::CopyVar { id: b });
                 }
                 if kernel.values[b].init.is_some_and(|op| op.is_one())
-                && kernel.values[b].state != ValueState::Mut {
+                    && kernel.values[b].state != ValueState::Mut
+                {
                     kernel.values[value_id].init.replace(Op::CopyVar { id: a });
                 }
             }
-            Op::Div { a, b } => {
+            Op::Div { a, b }
                 if kernel.values[b].init.is_some_and(|op| op.is_one())
-                && kernel.values[b].state != ValueState::Mut {
-                    kernel.values[value_id].init.replace(Op::CopyVar { id: a });
-                }
+                    && kernel.values[b].state != ValueState::Mut =>
+            {
+                kernel.values[value_id].init.replace(Op::CopyVar { id: a });
             }
             _ => {}
         }

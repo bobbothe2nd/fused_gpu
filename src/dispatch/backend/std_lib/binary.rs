@@ -96,7 +96,7 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
                     ValueId,
                     u32,
                     ValueId,
-                    bool,
+                    &mut bool,
                     &CompilationOptions<B>,
                 ) -> Result<Vec<NodeId>, Error>,
                         root: NodeId,
@@ -115,7 +115,7 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
                         local_col: ValueId,
                         shared_size: u32,
                         tile_size: ValueId,
-                        stable_iteration_space: bool,
+                        stable_iteration_space: &mut bool,
                         options: &CompilationOptions<B>| {
                     let mut deepest = Vec::new();
 
@@ -246,7 +246,7 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
                     ValueId,
                     u32,
                     ValueId,
-                    bool,
+                    &mut bool,
                     &CompilationOptions<B>,
                 ) -> Result<Vec<NodeId>, Error>,
                         root: NodeId,
@@ -265,7 +265,7 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
                         local_col: ValueId,
                         shared_size: u32,
                         tile_size: ValueId,
-                        stable_iteration_space: bool,
+                        stable_iteration_space: &mut bool,
                         options: &CompilationOptions<B>| {
                     let mut deepest = Vec::new();
 
@@ -444,7 +444,7 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
                     ValueId,
                     u32,
                     ValueId,
-                    bool,
+                    &mut bool,
                     &CompilationOptions<B>,
                 ) -> Result<Vec<NodeId>, Error>,
                         root: NodeId,
@@ -463,7 +463,7 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
                         local_col: ValueId,
                         shared_size: u32,
                         tile_size: ValueId,
-                        stable_iteration_space: bool,
+                        stable_iteration_space: &mut bool,
                         options: &CompilationOptions<B>| {
                     let mut deepest = Vec::new();
 
@@ -626,7 +626,7 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
                     ValueId,
                     u32,
                     ValueId,
-                    bool,
+                    &mut bool,
                     &CompilationOptions<B>,
                 ) -> Result<Vec<NodeId>, Error>,
                         root: NodeId,
@@ -645,7 +645,7 @@ impl<'a, B: GpuBackend> Graph<'a, B> {
                         local_col: ValueId,
                         shared_size: u32,
                         tile_size: ValueId,
-                        stable_iteration_space: bool,
+                        stable_iteration_space: &mut bool,
                         options: &CompilationOptions<B>| {
                     let mut deepest = Vec::new();
 
