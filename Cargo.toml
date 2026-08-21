@@ -2,12 +2,14 @@
 name = "fused_gpu"
 version = "0.1.0-alpha.1"
 edition = "2024"
+rust-version = "1.85"
+documentation = "https://docs.rs/fused_gpu"
+repository = "https://github.com/bobbothe2nd/fused_gpu"
 readme = "README.md"
 description = "GPU graph compilation to fuse linear tensor operations"
 license = "MIT"
 keywords = ["gpu", "autograd", "tensor", "machine-learning", "ai"]
 categories = ["compilers", "mathematics"]
-repository = "https://github.com/bobbothe2nd/fused_gpu"
 
 [profile.dev]
 incremental = false
@@ -42,7 +44,7 @@ required-features = ["std", "wgsl"]
 [dependencies]
 gpu_telemetry = { version = "0.2.0", optional = true }
 pollster = "0.4.0"
-briny = "0.5.0"
+briny = "0.7.0"
 bitflags = "2.13.1"
 
 [dev-dependencies]
